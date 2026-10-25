@@ -2,7 +2,7 @@
 
 Приложение: взять трек с телефона, один раз разложить нейросетью на **четыре дорожки**, играть под метроном. Если крутите BPM метронома — вместе с ним меняется скорость трека.
 
-Это папка **проекта Android Studio**. Git не используется. Версия **0.3.6**.
+Это папка **проекта Android Studio**. Репозиторий: https://github.com/zador94/test-music. Версия **0.3.10**.
 
 ## Что реально стоит в этом срезе
 
@@ -17,9 +17,17 @@
 
 Порядок выходов модели: `drums, bass, other, vocals`. Веса: `htdemucs_fp16weights.onnx` (~166 МБ), ONNX Runtime CPU. Новые сплиты — **IEEE float32 WAV** 44.1 кГц. Плеер стемов **не** декодирует эти WAV через ExoPlayer: `StemMixMediaSource` отдаёт уже сведённый PCM 16-bit. Старые 16-bit WAV тоже читаются.
 
-Mute вокала = gain 0 у вокала, на **следующем** смешанном буфере (десятки мс), не через секунду очереди ExoPlayer. Гитара отдельно не выходит — она в «Музыке». Метроном: клик ~2.2 поверх микса, доля «раз» громче.
+Mute вокала = gain 0 у вокала, на **следующем** смешанном буфере (десятки мс, либо `AudioTrack.getMinBufferSize` на эмуляторе), не через секунду очереди ExoPlayer. Гитара отдельно не выходит — она в «Музыке». Метроном (как веб): **отдельный** `ClickTrack` / AudioTrack, не тихий mix в stem PCM. Gain «раз» 2.2, остальные доли 1.65; downbeat длиннее/ниже. Lookahead 0.12 с wall × speed.
 
 После разбора рядом со стемами пишется `tracks/{id}/analysis.json`: BPM, `beats[]`, duration из длины PCM. Поле «Темп (оригинальный BPM)» заполняется детектором (не 120 по умолчанию). Метроном кликает по `beats[i]` в media time. Строку темпа по-прежнему можно поправить руками.
+
+## Почему 0.3.9 крашилось при включении клика
+
+`ClickTrack` читал `ExoPlayer.currentPosition` / `playWhenReady` с потока `metronome-click`. Media3 разрешает плеер только с одного потока (main) → `IllegalStateException` → процесс умирает в момент Switch метронома. С 0.3.10 часы клика — снимок с main (`ClickClock`: songTime = origin + elapsed × speed), worker ExoPlayer не трогает.
+
+## Почему 0.3.8 метроном всё ещё не слышно
+
+Веб не мешает клик в song buffer. До 0.3.8 Android писал клик в тот же PCM, что стемы (`mixInPlace` в `MetronomePcmPipe`). На устройстве этот буфер часто не доходил до колонок (`isPcm==false`, mime не `audio/raw`, либо 0.78 peak тонул в барабанах). С 0.3.9 клик — второй `AudioTrack` (`ClickTrack` / `ClickLayer`), gain «раз» 2.2, lookahead 0.12 с. Stem pipe кликов не содержит.
 
 ## Почему 0.3.3 глох при движении слайдера метронома
 
@@ -34,7 +42,7 @@ Mute вокала = gain 0 у вокала, на **следующем** смеш
 1. **Клики не на долях.** Сетка считалась через `ceil` в `double` плюс `remainderIndex` через границу буфера: клик доигрывался с кадра 0 **и** в том же буфере стартовал заново. Доли плыли относительно `presentationTimeUs`. Сейчас [BeatClock]: целые микросекунды от t=0 по **original BPM**. Клики мешаются в media time **до** Sonic, поэтому после `speed = metronomeBpm / originalBpm` остаются на музыкальных битах. Handler-таймера нет.
 2. **Метроном ON во время Play останавливал звук.** Пока клики выключены, sink отдавал **буфер декодера** в `DefaultAudioSink`. Sink запоминает identity (`inputBuffer == buffer`) и не принимает другой ByteBuffer, пока не доест текущий. Включение кликов подсовывало `mixBuffer` → `IllegalArgumentException` → ExoPlayer в ошибке, `play()` ничего не делает, пока не `load()` (переключение на «4 стемы»). Сейчас [MetronomePcmPipe] **всегда** копирует PCM в свой буфер, даже если клики выключены. Toggle — только флаг, без stop/prepare.
 
-Оригинал и стемы по-прежнему один ExoPlayer. Клики поверх любого таба. С 0.3.5 клики идут по `beats[]`, не по равной сетке от нуля.
+Оригинал и стемы по-прежнему один ExoPlayer. Клики — второй AudioTrack (`ClickTrack`), поэтому слышны и при mute всех стемов, и когда sink mime не `audio/raw`. С 0.3.5 доли из `beats[]`; без analysis — сетка `BeatClock`.
 
 ## Тесты (JVM, без эмулятора)
 
@@ -42,7 +50,7 @@ Mute вокала = gain 0 у вокала, на **следующем** смеш
 ./gradlew :app:testDebugUnitTest
 ```
 
-Как `vendor/bin/phpunit`: крутит JUnit на компьютере, телефон не нужен. Есть кейсы: mute на текущем mix-буфере; громкость клика vs полный микс; синтетический клик 120 BPM ±1.5 и `beats[]`; half/double 70–180; доли на media time; toggle метронома без reload; набор original BPM без падения; многократный speed-down слайдера без pause/error.
+Как `vendor/bin/phpunit`: крутит JUnit на компьютере, телефон не нужен. Есть кейсы: mute на текущем mix-буфере; стемы замучены → клик всё равно в `ClickLayer`; stem pipe не содержит кликов; speed-up не дропается гейтом; software stretch >1×. JVM не слышит колонки: два AudioTrack на BlueStacks этими тестами не проверяются.
 
 ## Скопировать и собрать APK на Windows
 
@@ -51,7 +59,7 @@ Mute вокала = gain 0 у вокала, на **следующем** смеш
 1. Скопируйте **всю** эту папку (там, где `settings.gradle.kts`) поверх копии Android Studio.
 2. File → Sync Project with Gradle Files.
 3. **Build → Generate App Bundles or APKs → Generate APKs** (debug).
-4. Поставьте новый APK **0.3.6**. Mute на «4 стемы» должен срезать вокал сразу; метроном ON — клик слышен поверх ударных.
+4. Поставьте новый APK **0.3.10**. Вкладка «4 стемы» должна звучать. Метроном ON не должен крашить приложение. Клик поверх ударных (drums solo, громкость не в нуле). Слайдер метронома **вверх** ускоряет трек, вниз — замедляет.
 
 Если Kotlin-демон падает (`kotlin compile daemon is ready`) — в `gradle.properties` уже `kotlin.compiler.execution.strategy=in-process`.
 

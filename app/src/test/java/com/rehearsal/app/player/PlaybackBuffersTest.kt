@@ -16,4 +16,18 @@ class PlaybackBuffersTest {
         val quarterSecond = bytesPerSecond / 4
         assertTrue(bytes < quarterSecond)
     }
+
+    @Test
+    fun chooseTrackBytesNeverBelowDeviceMin() {
+        val requested = PlaybackBuffers.audioTrackBytesForPcm16Stereo(44100)
+        val fallback = PlaybackBuffers.fallbackAudioTrackBytes(44100, 2, 2)
+        assertEquals(32768, PlaybackBuffers.chooseTrackBytes(requested, 32768, fallback))
+        assertTrue(PlaybackBuffers.chooseTrackBytes(requested, 32768, fallback) >= 32768)
+        assertEquals(fallback, PlaybackBuffers.chooseTrackBytes(requested, 0, fallback))
+        assertEquals(fallback, PlaybackBuffers.chooseTrackBytes(requested, -2, fallback))
+        assertEquals(requested, PlaybackBuffers.chooseTrackBytes(requested, 4096, fallback))
+        val fallbackSeconds = fallback.toDouble() / (44100 * 4)
+        assertTrue("fallback must stay under a second, was $fallbackSeconds", fallbackSeconds < 0.3)
+        assertTrue(fallbackSeconds > 0.2)
+    }
 }

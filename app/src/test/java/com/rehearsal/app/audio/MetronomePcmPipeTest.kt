@@ -3,10 +3,14 @@ package com.rehearsal.app.audio
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
+import com.rehearsal.app.WavFixtures
+import com.rehearsal.app.data.StemId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
@@ -14,6 +18,9 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 class MetronomePcmPipeTest {
+    @get:Rule
+    val tmp = TemporaryFolder()
+
     @Test
     fun togglingEnabledWhilePlayingDoesNotReloadOrThrowOrRewind() {
         val engine = engine(enabled = false)
@@ -68,10 +75,9 @@ class MetronomePcmPipeTest {
 
         val mixed = sink.lastSubmittedAsBuffer()
         assertTrue(mixed.remaining() > 0)
-        assertTrue("music energy must survive clicks", rms(mixed) > rms(original) * 0.5)
+        assertTrue("music energy must survive metronome toggle", rms(mixed) > rms(original) * 0.5)
         assertFalse(isAllZeros(mixed))
         assertTrue(correlation(original, mixed) > 0.85)
-        assertTrue(peak(mixed) > peak(original) + 0.15)
     }
 
     @Test
@@ -118,6 +124,104 @@ class MetronomePcmPipeTest {
         val after = sinePcm16(frames = 512)
         assertTrue(drain(pipe, after, pts, sink))
         assertFalse(sink.isAllZeros())
+    }
+
+    @Test
+    fun stemLiveRemixSubmittedToSinkIsNotAllZeros() {
+        val bank = StemMixBank()
+        bank.load(WavFixtures.writeStemSet(tmp.newFolder("pipe-stems")))
+        StemId.entries.forEach { bank.setGain(it, 1f) }
+        val engine = engine(enabled = false)
+        val pipe = MetronomePcmPipe(engine, bank)
+        pipe.configure(pcm16Format())
+        val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        val source = renderBank(bank)
+        assertTrue(drain(pipe, source, 0L, sink))
+        assertFalse("live remix at sink must submit non-silent PCM when stems have signal", sink.isAllZeros())
+        bank.clear()
+    }
+
+    @Test
+    fun stemPipeDoesNotCarryClicks() {
+        val bank = StemMixBank()
+        bank.load(WavFixtures.writeStemSet(tmp.newFolder("pipe-click")))
+        StemId.entries.forEach { bank.setGain(it, 0.12f) }
+        val off = engine(enabled = false)
+        val on = engine(enabled = true)
+        on.setBeatTimesUs(longArrayOf(0L, 500_000L))
+        val source = renderBank(bank)
+
+        val offPipe = MetronomePcmPipe(off, bank)
+        offPipe.configure(pcm16Format())
+        val offSink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        assertTrue(drain(offPipe, source.duplicate(), 0L, offSink))
+
+        val onPipe = MetronomePcmPipe(on, bank)
+        onPipe.configure(pcm16Format())
+        val onSink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        assertTrue(drain(onPipe, source.duplicate(), 0L, onSink))
+
+        val stemsOnly = offSink.lastSubmittedAsBuffer()
+        val withFlag = onSink.lastSubmittedAsBuffer()
+        assertFalse(isAllZeros(stemsOnly))
+        assertEquals(
+            "clicks are not in the stem pipe; dedicated ClickLayer",
+            stemsOnly.remaining(),
+            withFlag.remaining(),
+        )
+        val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
+        layer.limit(1024 * 4)
+        ClickLayer.render(layer, on, 0L, 1f)
+        layer.position(0)
+        assertTrue("click layer energy independent of stem pipe", peak(layer) > 0.85)
+        bank.clear()
+    }
+
+    @Test
+    fun timeUnsetStillMixesClickEnergy() {
+        val engine = engine(enabled = true)
+        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
+        val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
+        layer.limit(1024 * 4)
+        ClickLayer.render(layer, engine, C.TIME_UNSET, 1f)
+        layer.position(0)
+        assertFalse("TIME_UNSET playhead still clicks on the dedicated layer", isAllZeros(layer))
+        assertTrue(peak(layer) > 0.5)
+    }
+
+    @Test
+    fun softwareSpeedUpSubmitsFewerBytesWithoutSilencing() {
+        val engine = engine(enabled = false)
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(pcm16Format())
+        pipe.softwareSpeed = 1.5f
+        val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        val music = sinePcm16(frames = 300)
+        assertTrue(drain(pipe, music, 0L, sink))
+        val out = sink.lastSubmittedAsBuffer()
+        assertEquals(200 * 4, out.remaining())
+        assertFalse(isAllZeros(out))
+    }
+
+    @Test
+    fun missingPcmEncodingStillMixesClicks() {
+        val engine = MetronomeClickEngine()
+        engine.configure(
+            Format.Builder()
+                .setSampleMimeType(MimeTypes.AUDIO_RAW)
+                .setSampleRate(44100)
+                .setChannelCount(2)
+                .build(),
+        )
+        engine.originalBpm = 120f
+        engine.enabled = true
+        engine.setBeatTimesUs(longArrayOf(0L))
+        val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
+        layer.limit(1024 * 4)
+        ClickLayer.render(layer, engine, 0L, 1f)
+        layer.position(0)
+        assertFalse("click layer ignores sink mime/pcmEncoding", isAllZeros(layer))
+        assertTrue(peak(layer) > 0.5)
     }
 
     @Test
@@ -174,6 +278,15 @@ class MetronomePcmPipeTest {
         .setSampleRate(44100)
         .setChannelCount(2)
         .build()
+
+    private fun renderBank(bank: StemMixBank): ByteBuffer {
+        val frames = 1024
+        val out = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.nativeOrder())
+        bank.render(out, C.ENCODING_PCM_16BIT, 2, 0L)
+        out.position(0)
+        out.limit(frames * 4)
+        return out
+    }
 
     private fun sinePcm16(frames: Int): ByteBuffer {
         val buf = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN)

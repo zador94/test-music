@@ -29,15 +29,15 @@ class MetronomeClickEngineTest {
         val engine = engine(enabled = true)
         val src = sinePcm16(frames = 44100)
         val original = snapshot(src)
-        val out = ClickMix.copyAndMix(src, ByteBuffer.allocateDirect(0), engine, 0L)
-        assertFalse(isJackhammer(out))
-        val corr = correlation(original, out)
+        val song = ClickMix.copyAndMix(src, ByteBuffer.allocateDirect(0), engine, 0L)
         assertTrue(
-            "clicks may add peaks but music must still correlate (corr=$corr)",
-            corr > 0.5,
+            "song PCM must stay untouched; clicks live on ClickLayer",
+            buffersEqual(original, song),
         )
-        assertTrue("click should be audible over the 0.25 sine", peak(out) > peak(original) + 0.2)
-        assertTrue(peak(out) <= 1.0)
+        val clicks = clickLayer(engine, silencePcm16(44100), 0L)
+        assertFalse(isJackhammer(clicks))
+        assertTrue("dedicated click layer must be loud", peak(clicks) > 0.85)
+        assertTrue(peak(clicks) <= 1.0)
     }
 
     @Test
@@ -46,6 +46,7 @@ class MetronomeClickEngineTest {
         val music = sinePcm16(frames = 44100)
         val withClicks = ClickMix.copyAndMix(music, ByteBuffer.allocateDirect(0), engine, 0L)
         assertFalse(isJackhammer(withClicks))
+        assertFalse(isJackhammer(clickLayer(engine, silencePcm16(44100), 0L)))
 
         engine.enabled = false
         engine.onFlush()
@@ -70,7 +71,7 @@ class MetronomeClickEngineTest {
         assertEquals(500_000L, intervalUs)
 
         val frames = sampleRate * 2
-        val out = ClickMix.copyAndMix(silencePcm16(frames), ByteBuffer.allocateDirect(0), engine, 0L)
+        val out = clickLayer(engine, silencePcm16(frames), 0L)
         val shorts = out.duplicate().order(out.order()).asShortBuffer()
         val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(48)
         val expected = listOf(0L, 500_000L, 1_000_000L, 1_500_000L)
@@ -94,16 +95,14 @@ class MetronomeClickEngineTest {
         val sampleRate = 44100
         val frames = sampleRate
         val chunkFrames = 512
-        val whole = ClickMix.copyAndMix(silencePcm16(frames), ByteBuffer.allocateDirect(0), engine, 0L)
+        val whole = clickLayer(engine, silencePcm16(frames), 0L)
 
-        val concat = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN)
+        val concat = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.nativeOrder())
         var offset = 0
-        var dest = ByteBuffer.allocateDirect(0)
         while (offset < frames) {
             val n = minOf(chunkFrames, frames - offset)
             val pts = BeatClock.sampleToMediaUs(offset.toLong(), sampleRate)
-            val chunk = ClickMix.copyAndMix(silencePcm16(n), dest, engine, pts)
-            dest = chunk
+            val chunk = clickLayer(engine, silencePcm16(n), pts)
             concat.put(chunk.asReadOnlyBuffer())
             offset += n
         }
@@ -136,17 +135,15 @@ class MetronomeClickEngineTest {
 
         val sampleRate = 44100
         val frames = sampleRate * 2
-        val whole = ClickMix.copyAndMix(silencePcm16(frames), ByteBuffer.allocateDirect(0), engine, 0L)
+        val whole = clickLayer(engine, silencePcm16(frames), 0L)
 
-        val concat = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN)
+        val concat = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.nativeOrder())
         var offset = 0
-        var dest = ByteBuffer.allocateDirect(0)
         val chunkFrames = 512
         while (offset < frames) {
             val n = minOf(chunkFrames, frames - offset)
             val pts = BeatClock.sampleToMediaUs(offset.toLong(), sampleRate)
-            val chunk = ClickMix.copyAndMix(silencePcm16(n), dest, engine, pts)
-            dest = chunk
+            val chunk = clickLayer(engine, silencePcm16(n), pts)
             concat.put(chunk.asReadOnlyBuffer())
             offset += n
         }
@@ -173,7 +170,7 @@ class MetronomeClickEngineTest {
         val sampleRate = 44100
         val startUs = 1_200_000L
         val frames = 44100 / 2
-        val out = ClickMix.copyAndMix(silencePcm16(frames), ByteBuffer.allocateDirect(0), engine, startUs)
+        val out = clickLayer(engine, silencePcm16(frames), startUs)
         val shorts = out.duplicate().order(out.order()).asShortBuffer()
         val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(48)
         val nearest = BeatClock.mediaUsToSample(1_500_000L - startUs, sampleRate).toInt()
@@ -190,28 +187,30 @@ class MetronomeClickEngineTest {
     fun clickPunchesThroughFullMixAndDownbeatIsLouder() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
+        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val sampleRate = 44100
         val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(48)
-        val loud = sinePcm16(frames = sampleRate, amplitude = 0.85)
-        val original = snapshot(loud)
-        val mixed = ClickMix.copyAndMix(loud, ByteBuffer.allocateDirect(0), engine, 0L)
-
-        val origPeak = peakInRange(
-            original.duplicate().order(original.order()).asShortBuffer(),
-            0,
-            clickFrames,
-        )
+        val layer = clickLayer(engine, silencePcm16(sampleRate), 0L)
+        val withBeats = layer
         val downbeatPeak = peakInRange(
-            mixed.duplicate().order(mixed.order()).asShortBuffer(),
+            withBeats.duplicate().order(withBeats.order()).asShortBuffer(),
             0,
             clickFrames,
         )
-        assertTrue("click 0.78 drowned in full mix; need ~2.2 punch, peak=$downbeatPeak orig=$origPeak", downbeatPeak > 0.95)
-        assertTrue(downbeatPeak > origPeak + 0.08)
+        assertTrue("dedicated layer must punch at ~2.2, peak=$downbeatPeak", downbeatPeak > 0.95)
+        assertTrue("stems muted: click layer still has energy", peak(layer) > 0.5)
 
-        val downbeatAdded = addedEnergy(original, mixed, 0, clickFrames)
+        val downbeatAdded = peakInRange(
+            withBeats.duplicate().order(withBeats.order()).asShortBuffer(),
+            0,
+            clickFrames,
+        )
         val offbeatStart = BeatClock.mediaUsToSample(500_000L, sampleRate).toInt()
-        val offbeatAdded = addedEnergy(original, mixed, offbeatStart, offbeatStart + clickFrames)
+        val offbeatAdded = peakInRange(
+            withBeats.duplicate().order(withBeats.order()).asShortBuffer(),
+            offbeatStart,
+            offbeatStart + clickFrames,
+        )
         assertTrue(
             "downbeat must be louder than other beats ($downbeatAdded vs $offbeatAdded)",
             downbeatAdded > offbeatAdded * 1.05,
@@ -255,6 +254,13 @@ class MetronomeClickEngineTest {
         .setSampleRate(44100)
         .setChannelCount(2)
         .build()
+
+    private fun clickLayer(engine: MetronomeClickEngine, dest: ByteBuffer, pts: Long): ByteBuffer {
+        ClickLayer.render(dest, engine, pts, speed = 1f)
+        dest.position(0)
+        dest.limit(dest.capacity())
+        return dest
+    }
 
     private fun silencePcm16(frames: Int): ByteBuffer {
         val buf = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.LITTLE_ENDIAN)

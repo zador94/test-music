@@ -73,6 +73,36 @@ class PlaybackSpeedGateTest {
     }
 
     @Test
+    fun speedUpRequestIsNotDropped() {
+        var now = 0L
+        val gate = PlaybackSpeedGate(minIntervalMs = 80L, nowMs = { now })
+        val applied = ArrayList<Float>()
+        applied.add(gate.request(1f, force = true)!!)
+        now = 200L
+        val up = PlaybackMath.playbackSpeed(180f, 120f)
+        assertEquals(1.5f, up, 1e-5f)
+        gate.request(up)?.let { applied.add(it) }
+        now = 400L
+        gate.poll()?.let { applied.add(it) }
+        assertTrue("speed-up 1.0→1.5 must reach the player, was $applied", applied.any { it > 1.2f })
+        assertEquals(PlaybackSpeedGate.quantize(1.5f)!!, applied.last(), 1e-5f)
+    }
+
+    @Test
+    fun speedDownStillAppliesBelowOne() {
+        var now = 0L
+        val gate = PlaybackSpeedGate(minIntervalMs = 80L, nowMs = { now })
+        val applied = ArrayList<Float>()
+        applied.add(gate.request(1f, force = true)!!)
+        now = 200L
+        gate.request(PlaybackMath.playbackSpeed(60f, 120f))?.let { applied.add(it) }
+        now = 400L
+        gate.poll()?.let { applied.add(it) }
+        assertTrue(applied.last() < 0.8f)
+        assertEquals(PlaybackSpeedGate.quantize(0.5f)!!, applied.last(), 1e-5f)
+    }
+
+    @Test
     fun nanAndZeroNeverLeaveTheGate() {
         val gate = PlaybackSpeedGate(nowMs = { 1_000L })
         assertEquals(null, gate.request(Float.NaN))

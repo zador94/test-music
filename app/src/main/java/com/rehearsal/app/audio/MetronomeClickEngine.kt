@@ -4,44 +4,46 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.round
 import kotlin.math.sin
 
 /**
- * Клик в PCM по [presentationTimeUs].
- * Если есть `beats[]` из analysis.json — стреляем по ним (media time).
- * Иначе равная сетка [BeatClock] от t=0 по original BPM (старые треки без анализа).
- * Lookahead только внутри текущего PCM-буфера. Handler-таймера нет.
+ * Слой клика (Web Audio node): [renderLayer] в отдельный PCM, не в stem mix.
+ * `beats[]` в media time; без analysis — равная сетка [BeatClock].
+ * Lookahead задаёт [ClickLayer] (0.12s wall × speed). Handler-таймера нет.
  */
 class MetronomeClickEngine {
     @Volatile var enabled: Boolean = false
     @Volatile var originalBpm: Float = DEFAULT_BPM
     @Volatile private var beatTimesUs: LongArray = EmptyBeats
 
-    var sampleRate: Int = 44100
+    var sampleRate: Int = ClickLayer.SAMPLE_RATE
         private set
-    var channelCount: Int = 2
+    var channelCount: Int = ClickLayer.CHANNELS
         private set
     var encoding: Int = C.ENCODING_PCM_16BIT
         private set
 
     private var bytesPerSample: Int = 2
-    private var click: FloatArray = synthesizeClick(44100)
+    private val downbeat: FloatArray = synthesizeDownbeat(ClickLayer.SAMPLE_RATE)
+    private val beatClick: FloatArray = synthesizeBeat(ClickLayer.SAMPLE_RATE)
 
     fun configure(format: Format) {
-        sampleRate = format.sampleRate.takeIf { it > 0 } ?: 44100
-        channelCount = format.channelCount.takeIf { it > 0 } ?: 2
+        sampleRate = format.sampleRate.takeIf { it > 0 } ?: ClickLayer.SAMPLE_RATE
+        channelCount = format.channelCount.takeIf { it > 0 } ?: ClickLayer.CHANNELS
         encoding = resolveEncoding(format)
         bytesPerSample = when (encoding) {
             C.ENCODING_PCM_16BIT -> 2
             C.ENCODING_PCM_FLOAT -> 4
             else -> 0
         }
-        click = synthesizeClick(sampleRate)
     }
 
     fun onFlush() {
-        // Сетка считается заново из presentationTimeUs — состояния клика нет.
+        // Сетка из presentationTimeUs / playhead. Состояния клика нет.
     }
 
     fun isPcm(): Boolean = bytesPerSample > 0
@@ -49,8 +51,8 @@ class MetronomeClickEngine {
     fun hasBeatTimes(): Boolean = beatTimesUs.isNotEmpty()
 
     fun clickDurationUs(): Long {
-        if (sampleRate <= 0) return 0L
-        return click.size.toLong() * 1_000_000L / sampleRate.toLong()
+        val n = maxOf(downbeat.size, beatClick.size)
+        return n.toLong() * 1_000_000L / ClickLayer.SAMPLE_RATE
     }
 
     fun setAnalysis(analysis: TrackAnalysis?) {
@@ -71,70 +73,110 @@ class MetronomeClickEngine {
         beatTimesUs = copy
     }
 
-    fun mixInPlace(buffer: ByteBuffer, presentationTimeUs: Long) {
-        if (!enabled || bytesPerSample == 0 || presentationTimeUs == C.TIME_UNSET) return
+    /**
+     * Только клики в [out] (stereo 16-bit native). Не читает stems.
+     * @return us последней нарисованной доли
+     */
+    fun renderLayer(
+        out: ByteBuffer,
+        mediaStartUs: Long,
+        speed: Float,
+        fromExclusiveUs: Long = Long.MIN_VALUE,
+    ): Long {
+        out.order(ByteOrder.nativeOrder())
+        zero(out)
+        if (!enabled) return fromExclusiveUs
         val bpm = originalBpm
-        if (bpm < MIN_BPM) return
-
-        val frameSizeBytes = bytesPerSample * channelCount
-        if (frameSizeBytes <= 0) return
-        val origin = buffer.position()
-        val remaining = buffer.remaining()
-        if (remaining < frameSizeBytes || remaining % frameSizeBytes != 0) return
-        val frames = remaining / frameSizeBytes
-        if (frames <= 0) return
-
-        val startUs = presentationTimeUs.coerceAtLeast(0L)
-        val clickUs = clickDurationUs().coerceAtLeast(1L)
+        if (bpm < MIN_BPM) return fromExclusiveUs
+        val rate = ClickLayer.SAMPLE_RATE
+        val origin = out.position()
+        val remaining = out.remaining()
+        val frames = remaining / ClickLayer.BYTES_PER_FRAME
+        if (frames <= 0) return fromExclusiveUs
+        val speedSafe = speed.coerceIn(0.5f, 2f)
+        val wallDurationUs = BeatClock.sampleToMediaUs(frames.toLong(), rate)
+        val mediaDurationUs = (wallDurationUs * speedSafe.toDouble()).toLong().coerceAtLeast(1L)
+        val startUs = if (mediaStartUs == C.TIME_UNSET || mediaStartUs < 0L) 0L else mediaStartUs
+        val endUs = startUs + mediaDurationUs
+        val clickMediaUs = (clickDurationUs() * speedSafe.toDouble()).toLong().coerceAtLeast(1L)
         val beats = beatTimesUs
+        var last = fromExclusiveUs
         if (beats.isNotEmpty()) {
-            mixFromTimes(buffer, origin, frames, startUs, clickUs, beats)
+            last = paintFromTimes(out, origin, frames, startUs, endUs, clickMediaUs, speedSafe, beats, fromExclusiveUs)
         } else {
-            mixEqualGrid(buffer, origin, frames, startUs, clickUs, BeatClock.intervalUs(bpm))
+            last = paintEqualGrid(
+                out,
+                origin,
+                frames,
+                startUs,
+                endUs,
+                clickMediaUs,
+                speedSafe,
+                BeatClock.intervalUs(bpm),
+                fromExclusiveUs,
+            )
         }
+        out.position(origin)
+        out.limit(origin + frames * ClickLayer.BYTES_PER_FRAME)
+        return last
     }
 
-    private fun mixFromTimes(
+    private fun paintFromTimes(
         buffer: ByteBuffer,
         origin: Int,
         frames: Int,
         startUs: Long,
-        clickUs: Long,
+        endUs: Long,
+        clickMediaUs: Long,
+        speed: Float,
         times: LongArray,
-    ) {
-        val durationUs = BeatClock.sampleToMediaUs(frames.toLong(), sampleRate)
-        val endUs = startUs + durationUs
-        var i = BeatClock.firstOverlappingIndex(times, startUs, clickUs)
+        fromExclusiveUs: Long,
+    ): Long {
+        var i = BeatClock.firstOverlappingIndex(times, startUs, clickMediaUs)
+        var last = fromExclusiveUs
         var guard = 0
         while (i < times.size && guard < MAX_BEATS_PER_BUFFER) {
             val beatUs = times[i]
             if (beatUs >= endUs) break
-            paintClick(buffer, origin, frames, startUs, beatUs, beatIndex = i)
+            if (beatUs > fromExclusiveUs) {
+                paintClick(buffer, origin, frames, startUs, beatUs, beatIndex = i, speed = speed)
+                last = maxOf(last, beatUs)
+            }
             i++
             guard++
         }
+        return last
     }
 
-    private fun mixEqualGrid(
+    private fun paintEqualGrid(
         buffer: ByteBuffer,
         origin: Int,
         frames: Int,
         startUs: Long,
-        clickUs: Long,
+        endUs: Long,
+        clickMediaUs: Long,
+        speed: Float,
         intervalUs: Long,
-    ) {
-        var beatUs = BeatClock.firstOverlappingBeatUs(startUs, intervalUs, clickUs)
+        fromExclusiveUs: Long,
+    ): Long {
+        var beatUs = BeatClock.firstOverlappingBeatUs(startUs, intervalUs, clickMediaUs)
+        var last = fromExclusiveUs
         var guard = 0
         while (guard < MAX_BEATS_PER_BUFFER) {
-            val startFrame = BeatClock.frameOffset(beatUs, startUs, sampleRate)
-            if (startFrame >= frames) break
+            if (beatUs >= endUs) break
             val beatIndex = if (intervalUs > 0L) (beatUs / intervalUs).toInt() else 0
-            paintClick(buffer, origin, frames, startUs, beatUs, beatIndex)
+            val startFrame = wallFrame(beatUs, startUs, speed)
+            if (startFrame >= frames && beatUs > startUs) break
+            if (beatUs > fromExclusiveUs) {
+                paintClick(buffer, origin, frames, startUs, beatUs, beatIndex, speed)
+                last = maxOf(last, beatUs)
+            }
             val next = beatUs + intervalUs
             if (next <= beatUs) break
             beatUs = next
             guard++
         }
+        return last
     }
 
     private fun paintClick(
@@ -144,69 +186,67 @@ class MetronomeClickEngine {
         startUs: Long,
         beatUs: Long,
         beatIndex: Int,
+        speed: Float,
     ) {
-        val startFrame = BeatClock.frameOffset(beatUs, startUs, sampleRate)
-        if (startFrame >= frames) return
+        val startFrame = wallFrame(beatUs, startUs, speed)
+        val wave = if (beatIndex % BEATS_PER_BAR == 0) downbeat else beatClick
         val clickOffset = if (startFrame < 0) -startFrame else 0
         val frame = if (startFrame < 0) 0 else startFrame
-        if (clickOffset < click.size && frame < frames) {
-            mixClick(
-                buffer,
-                origin,
-                startFrame = frame,
-                clickOffset = clickOffset,
-                frames = frames,
-                gain = clickGain(beatIndex),
-            )
-        }
-    }
-
-    private fun mixClick(
-        buffer: ByteBuffer,
-        origin: Int,
-        startFrame: Int,
-        clickOffset: Int,
-        frames: Int,
-        gain: Float,
-    ) {
+        if (clickOffset >= wave.size || frame >= frames) return
+        val gain = clickGain(beatIndex)
         var i = clickOffset
-        var frame = startFrame
-        while (i < click.size && frame < frames) {
-            val sample = click[i] * gain
-            when (encoding) {
-                C.ENCODING_PCM_16BIT -> mixShortFrame(buffer, origin, frame, sample)
-                C.ENCODING_PCM_FLOAT -> mixFloatFrame(buffer, origin, frame, sample)
-            }
+        var f = frame
+        while (i < wave.size && f < frames) {
+            writeShortFrame(buffer, origin, f, wave[i] * gain)
             i++
-            frame++
+            f++
         }
     }
 
-    private fun mixShortFrame(buffer: ByteBuffer, origin: Int, frame: Int, clickSample: Float) {
-        val add = (clickSample * Short.MAX_VALUE).toInt()
-        for (ch in 0 until channelCount) {
-            val idx = origin + (frame * channelCount + ch) * 2
+    private fun wallFrame(beatUs: Long, startUs: Long, speed: Float): Int {
+        // Sample-domain, not (beatUs - startUs) then convert: chunked 512-frame
+        // buffers must land on the same frame as a single whole-buffer render.
+        val mediaFrame = BeatClock.frameOffset(beatUs, startUs, ClickLayer.SAMPLE_RATE)
+        if (speed == 1f) return mediaFrame
+        return round(mediaFrame / speed.toDouble()).toInt()
+    }
+
+    private fun writeShortFrame(buffer: ByteBuffer, origin: Int, frame: Int, sample: Float) {
+        val pcm = (sample * Short.MAX_VALUE).toInt()
+            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            .toShort()
+        for (ch in 0 until ClickLayer.CHANNELS) {
+            val idx = origin + (frame * ClickLayer.CHANNELS + ch) * 2
             if (idx + 2 > buffer.limit()) return
-            val mixed = buffer.getShort(idx).toInt() + add
-            buffer.putShort(
-                idx,
-                mixed.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort(),
-            )
+            buffer.putShort(idx, pcm)
         }
     }
 
-    private fun mixFloatFrame(buffer: ByteBuffer, origin: Int, frame: Int, clickSample: Float) {
-        for (ch in 0 until channelCount) {
-            val idx = origin + (frame * channelCount + ch) * 4
-            if (idx + 4 > buffer.limit()) return
-            buffer.putFloat(idx, (buffer.getFloat(idx) + clickSample).coerceIn(-1f, 1f))
-        }
+    private fun zero(out: ByteBuffer) {
+        val pos = out.position()
+        val lim = out.limit()
+        for (i in pos until lim) out.put(i, 0)
     }
 
     private fun resolveEncoding(format: Format): Int {
         return when (format.pcmEncoding) {
-            C.ENCODING_PCM_16BIT, C.ENCODING_PCM_FLOAT -> format.pcmEncoding
-            else -> if (MimeTypes.AUDIO_RAW == format.sampleMimeType) C.ENCODING_PCM_16BIT else 0
+            C.ENCODING_PCM_FLOAT -> C.ENCODING_PCM_FLOAT
+            C.ENCODING_PCM_16BIT -> C.ENCODING_PCM_16BIT
+            else -> {
+                val mime = format.sampleMimeType
+                if (mime == null || mime == MimeTypes.AUDIO_RAW) {
+                    C.ENCODING_PCM_16BIT
+                } else if (mime == MimeTypes.AUDIO_AAC ||
+                    mime == MimeTypes.AUDIO_MPEG ||
+                    mime == MimeTypes.AUDIO_OPUS
+                ) {
+                    0
+                } else if (mime.startsWith("audio/")) {
+                    C.ENCODING_PCM_16BIT
+                } else {
+                    0
+                }
+            }
         }
     }
 
@@ -215,7 +255,7 @@ class MetronomeClickEngine {
         const val MIN_BPM = 30f
         const val MAX_BPM = 240f
         const val BEATS_PER_BAR = 4
-        /** Как веб: клик ~2.2 поверх полного микса, иначе 0.78 тонет в барабанах. */
+        /** Как веб: master gain ~2.2 на «раз», иначе клик тонет в барабанах. */
         const val DOWNBEAT_GAIN = 2.2f
         const val BEAT_GAIN = 1.65f
         private const val MAX_BEATS_PER_BUFFER = 10_000
@@ -224,16 +264,43 @@ class MetronomeClickEngine {
         fun clickGain(beatIndex: Int): Float =
             if (beatIndex % BEATS_PER_BAR == 0) DOWNBEAT_GAIN else BEAT_GAIN
 
-        private fun synthesizeClick(sampleRate: Int): FloatArray {
-            val n = (sampleRate * 0.018).toInt().coerceAtLeast(48)
-            val f0 = 1850.0
-            val f1 = 3100.0
-            return FloatArray(n) { i ->
+        /**
+         * Пик волны = 1/DOWNBEAT_GAIN, чтобы «раз» × 2.2 = full-scale,
+         * остальные × 1.65 тише (~0.75) и не упирались в тот же клип.
+         */
+        private fun peakNormalize(wave: FloatArray, peak: Float): FloatArray {
+            var max = 1e-9f
+            for (s in wave) max = maxOf(max, abs(s))
+            val g = peak / max
+            return FloatArray(wave.size) { i -> wave[i] * g }
+        }
+
+        /** Доля «раз»: длиннее и ниже. */
+        fun synthesizeDownbeat(sampleRate: Int): FloatArray {
+            val n = (sampleRate * 0.028).toInt().coerceAtLeast(64)
+            val f0 = 980.0
+            val f1 = 1470.0
+            val raw = FloatArray(n) { i ->
                 val env = sin(PI * i / n)
                 val t = i.toDouble() / sampleRate
-                val s = (sin(2.0 * PI * f0 * t) + 0.45 * sin(2.0 * PI * f1 * t)) * env
+                val s = (sin(2.0 * PI * f0 * t) + 0.35 * sin(2.0 * PI * f1 * t)) * env
                 s.toFloat()
             }
+            return peakNormalize(raw, 1f / DOWNBEAT_GAIN)
+        }
+
+        /** Остальные доли: короче и выше. */
+        fun synthesizeBeat(sampleRate: Int): FloatArray {
+            val n = (sampleRate * 0.012).toInt().coerceAtLeast(48)
+            val f0 = 2450.0
+            val f1 = 3200.0
+            val raw = FloatArray(n) { i ->
+                val env = sin(PI * i / n)
+                val t = i.toDouble() / sampleRate
+                val s = (sin(2.0 * PI * f0 * t) + 0.4 * sin(2.0 * PI * f1 * t)) * env
+                s.toFloat()
+            }
+            return peakNormalize(raw, 1f / DOWNBEAT_GAIN)
         }
     }
 }
