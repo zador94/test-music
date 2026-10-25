@@ -39,6 +39,40 @@ object ClickClock {
         return ms.toInt().coerceIn(0, MAX_OUTPUT_LATENCY_MS)
     }
 
+    fun queuedLatencyMs(framesWritten: Long, playbackHeadPosition: Int, sampleRate: Int): Int {
+        val sr = sampleRate.coerceAtLeast(1)
+        val head = playbackHeadPosition.toLong() and 0xFFFFFFFFL
+        val queued = (framesWritten - head).coerceAtLeast(0L)
+        val ms = (queued * 1000L) / sr
+        return ms.toInt().coerceIn(0, MAX_OUTPUT_LATENCY_MS)
+    }
+
+    /**
+     * Фаза выходного AudioTrack, не темп. Крышка = реальный буфер:
+     * залипший [AudioTrack.getPlaybackHeadPosition] не должен разгонять media time.
+     */
+    fun writeLatencyMs(queuedLatencyMs: Int, bufferLatencyMs: Int): Int {
+        val queued = queuedLatencyMs.coerceIn(0, MAX_OUTPUT_LATENCY_MS)
+        val buffer = bufferLatencyMs.coerceIn(0, MAX_OUTPUT_LATENCY_MS)
+        return if (buffer > 0) minOf(queued, buffer) else queued
+    }
+
+    /**
+     * Следующий chunk = предыдущий + [mediaAdvanceUs].
+     * [targetUs] (playhead + очередь) — только resync на seek / большой срыв.
+     * Растущая очередь не должна укорачивать период клика.
+     */
+    fun nextWriteMediaUs(previousUs: Long, targetUs: Long, mediaAdvanceUs: Long): Long {
+        val target = targetUs.coerceAtLeast(0L)
+        if (previousUs == Long.MIN_VALUE) return target
+        val step = mediaAdvanceUs.coerceAtLeast(1L)
+        val stepped = previousUs + step
+        if (stepped < 0L) return target
+        val drift = kotlin.math.abs(stepped - target)
+        val slop = maxOf(step * 4, MAX_OUTPUT_LATENCY_MS * 1_000L)
+        return if (drift > slop) target else stepped
+    }
+
     fun scheduledMediaUs(heardMediaUs: Long, speed: Float, outputLatencyMs: Int): Long {
         val rate = if (speed.isFinite()) speed.coerceIn(0.5f, 2f) else 1f
         val latencyUs = outputLatencyMs.coerceIn(0, MAX_OUTPUT_LATENCY_MS).toLong() * 1_000L

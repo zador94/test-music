@@ -25,10 +25,10 @@ class TempoDetectorTest {
         assertEquals(SplitKind.HTDEMUCS_4STEM, analysis.separator)
         assertEquals(TrackAnalysis.DEFAULT_STEMS, analysis.stems)
         assertEquals(
-            "synthetic 120 BPM click must land ±1.5, was ${analysis.bpm}",
+            "synthetic 120 BPM click must land ±0.4, was ${analysis.bpm}",
             120.0,
             analysis.bpm.toDouble(),
-            1.5,
+            0.4,
         )
         assertTrue("beats ≥ 12, was ${analysis.beats.size}", analysis.beats.size >= 12)
         assertTrue(analysis.downbeatOffset >= 0.0)
@@ -58,9 +58,31 @@ class TempoDetectorTest {
             "half-tempo train must clamp into 70–180 near 120, was ${analysis.bpm}",
             120.0,
             analysis.bpm.toDouble(),
-            1.5,
+            0.4,
         )
         assertTrue(analysis.beats.size >= 12)
+    }
+
+    @Test
+    fun bpmFromBeatsRecoversHintThatIsTwoBpmOff() {
+        val period = 60.0 / 102.0
+        val beats = DoubleArray(24) { i ->
+            i * period + if (i % 2 == 0) 0.006 else -0.005
+        }
+        val measured = TempoMath.bpmFromBeats(beats, hintBpm = 100.0)
+        assertEquals(102.0, measured!!, 0.15)
+    }
+
+    @Test
+    fun synthetic102BpmDoesNotDriftByOneOrTwo() {
+        val pcm = stereoClicks(bpm = 102.0, bars = 8, beatsPerBar = 4)
+        val analysis = TempoDetector.analyze(pcm)
+        assertEquals(
+            "102 BPM song must not be stored as 100 or 104, was ${analysis.bpm}",
+            102.0,
+            analysis.bpm.toDouble(),
+            0.4,
+        )
     }
 
     @Test

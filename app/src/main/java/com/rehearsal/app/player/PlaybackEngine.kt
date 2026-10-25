@@ -12,6 +12,7 @@ import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.audio.RehearsalRenderersFactory
 import com.rehearsal.app.audio.StemMixBank
 import com.rehearsal.app.audio.StemMixMediaSource
+import com.rehearsal.app.audio.TempoMath
 import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
@@ -53,6 +54,8 @@ class PlaybackEngine(context: Context) {
     var originalBpm: Float = MetronomeClickEngine.DEFAULT_BPM
         private set
     var metronomeBpm: Float = MetronomeClickEngine.DEFAULT_BPM
+        private set
+    var measuredOriginalBpm: Float? = null
         private set
 
     init {
@@ -165,6 +168,9 @@ class PlaybackEngine(context: Context) {
         val file = dir?.let { File(it, TrackAnalysis.FILE_NAME) }
         val analysis = if (file != null) TrackAnalysis.fromFile(file) else null
         clicks.setAnalysis(analysis)
+        measuredOriginalBpm = analysis?.let { data ->
+            TempoMath.bpmFromBeats(data.beats, data.bpm.toDouble())?.toFloat()
+        }
     }
 
     fun setStemGain(id: StemId, gain: Float) {

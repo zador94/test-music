@@ -61,32 +61,34 @@ class PlayerViewModel(
         viewModelScope.launch {
             track.collect { item ->
                 if (item == null) return@collect
+                maybeLoad(item)
+                if (userOverrodeOriginalBpm) return@collect
+                val bpm = playback.measuredOriginalBpm
+                    ?: item.originalBpm
+                    ?: MetronomeClickEngine.DEFAULT_BPM
                 if (!bpmInitialized) {
-                    val bpm = item.originalBpm ?: MetronomeClickEngine.DEFAULT_BPM
                     playback.setOriginalBpm(bpm)
                     playback.setMetronomeBpm(bpm)
                     playback.setMetronomeEnabled(false)
                     _ui.update {
                         it.copy(
                             originalBpmText = bpm.toInt().toString(),
-                            originalBpm = bpm,
-                            metronomeBpm = bpm,
+                            originalBpm = playback.originalBpm,
+                            metronomeBpm = playback.metronomeBpm,
                             metronomeOn = false,
                             speed = playback.playbackSpeed(),
                         )
                     }
                     bpmInitialized = true
-                } else if (!userOverrodeOriginalBpm) {
-                    val detected = item.originalBpm
+                } else {
                     val current = _ui.value.originalBpm
-                    if (detected != null && abs(detected - current) > 0.05f) {
+                    if (abs(bpm - current) > 0.05f) {
                         val followMetronome = abs(_ui.value.metronomeBpm - current) < 0.51f
-                        playback.setOriginalBpm(detected)
-                        if (followMetronome) playback.setMetronomeBpm(detected)
-                        playback.loadAnalysis(item)
+                        playback.setOriginalBpm(bpm)
+                        if (followMetronome) playback.setMetronomeBpm(bpm)
                         _ui.update {
                             it.copy(
-                                originalBpmText = detected.toInt().toString(),
+                                originalBpmText = bpm.toInt().toString(),
                                 originalBpm = playback.originalBpm,
                                 metronomeBpm = playback.metronomeBpm,
                                 speed = playback.playbackSpeed(),
@@ -94,7 +96,6 @@ class PlayerViewModel(
                         }
                     }
                 }
-                maybeLoad(item)
             }
         }
         viewModelScope.launch {

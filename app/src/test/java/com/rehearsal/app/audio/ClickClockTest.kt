@@ -80,6 +80,47 @@ class ClickClockTest {
     }
 
     @Test
+    fun queuedLatencyMsFromWrittenMinusHead() {
+        assertEquals(80, ClickClock.queuedLatencyMs(3528, playbackHeadPosition = 0, sampleRate = 44100))
+        assertEquals(0, ClickClock.queuedLatencyMs(3528, playbackHeadPosition = 3528, sampleRate = 44100))
+        assertEquals(0, ClickClock.queuedLatencyMs(100, playbackHeadPosition = 400, sampleRate = 44100))
+    }
+
+    @Test
+    fun writeLatencyMsCapsQueueToBufferSoStuckHeadCannotRace() {
+        assertEquals(80, ClickClock.writeLatencyMs(queuedLatencyMs = 400, bufferLatencyMs = 80))
+        assertEquals(40, ClickClock.writeLatencyMs(queuedLatencyMs = 40, bufferLatencyMs = 80))
+        assertEquals(0, ClickClock.writeLatencyMs(queuedLatencyMs = 0, bufferLatencyMs = 80))
+        assertEquals(120, ClickClock.writeLatencyMs(queuedLatencyMs = 120, bufferLatencyMs = 0))
+    }
+
+    @Test
+    fun nextWriteMediaUsStepsByChunkNotByGrowingQueue() {
+        val advance = ClickLayer.mediaAdvanceUs(1f)
+        var cursor = ClickClock.nextWriteMediaUs(Long.MIN_VALUE, targetUs = 0L, advance)
+        assertEquals(0L, cursor)
+        var queuedUs = 0L
+        repeat(20) { i ->
+            queuedUs = minOf(queuedUs + advance, ClickClock.MAX_OUTPUT_LATENCY_MS * 1_000L)
+            val wallUs = (i + 1) * advance
+            cursor = ClickClock.nextWriteMediaUs(cursor, wallUs + queuedUs, advance)
+        }
+        assertEquals(20 * advance, cursor)
+        val seekTarget = 5_000_000L
+        assertEquals(seekTarget, ClickClock.nextWriteMediaUs(cursor, seekTarget, advance))
+    }
+
+    @Test
+    fun clickWriteStaysLockedToPlayheadNotFreeRun() {
+        val heard = 1_000_000L
+        val queuedMs = ClickClock.queuedLatencyMs(3528, 0, 44100)
+        val writeAt = ClickClock.scheduledMediaUs(heard, 1f, queuedMs)
+        val freeRun = heard + 10 * ClickLayer.mediaAdvanceUs(1f)
+        assertEquals(1_080_000L, writeAt)
+        assertTrue("free-run cursor would limp vs the song", freeRun > writeAt + 500_000L)
+    }
+
+    @Test
     fun scheduledCursorAddsOutputLatencyInMediaTime() {
         assertEquals(80_000L, ClickClock.scheduledMediaUs(0L, speed = 1f, outputLatencyMs = 80))
         assertEquals(160_000L, ClickClock.scheduledMediaUs(0L, speed = 2f, outputLatencyMs = 80))

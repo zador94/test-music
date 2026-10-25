@@ -29,9 +29,16 @@ object TempoDetector {
         }
         val rawBpm = estimateBpm(novelty, HOP, sr)
         val bpm = TempoMath.clampHalfDouble(rawBpm)
-        val (beats, offset) = trackBeats(novelty, bpm, duration, HOP, sr)
+        val first = trackBeats(novelty, bpm, duration, HOP, sr)
+        val refined = TempoMath.bpmFromBeats(first.first, bpm) ?: bpm
+        val (beats, offset) = if (abs(refined - bpm) > 0.05) {
+            trackBeats(novelty, refined, duration, HOP, sr)
+        } else {
+            first
+        }
+        val measured = TempoMath.bpmFromBeats(beats, refined) ?: refined
         return TrackAnalysis(
-            bpm = bpm.toFloat(),
+            bpm = measured.toFloat(),
             beats = beats,
             downbeatOffset = offset,
             timeSignature = intArrayOf(4, 4),

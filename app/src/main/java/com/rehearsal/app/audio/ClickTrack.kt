@@ -5,13 +5,13 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import com.rehearsal.app.player.PlaybackBuffers
 import java.nio.ByteBuffer
-import kotlin.math.abs
 
 /**
  * Второй AudioTrack — отдельный клик, не через DefaultAudioSink / MetronomePcmPipe.
  *
- * Часы: wall-chunk 0.12 с, media window = 0.12 × speed. Playhead ExoPlayer —
- * только seek/resync; курсор сдвинут на latency трека, чтобы клик попадал в долю.
+ * Курсор шагает на [ClickLayer.mediaAdvanceUs] (период = 60/BPM).
+ * Playhead + очередь — только фаза и resync (seek), не темп: иначе на
+ * BlueStacks [AudioTrack.getPlaybackHeadPosition] залипает и клик ускоряется.
  */
 class ClickTrack(
     private val engine: MetronomeClickEngine,
@@ -29,6 +29,7 @@ class ClickTrack(
     private var worker: Thread? = null
     @Volatile private var running = false
     @Volatile private var session = 0
+    private var framesWritten = 0L
     private var cursorUs = Long.MIN_VALUE
     private var lastClickUs = Long.MIN_VALUE
     private val chunk: ByteBuffer = ClickLayer.allocateChunk()
@@ -40,6 +41,7 @@ class ClickTrack(
                 running = true
                 session++
                 val mySession = session
+                framesWritten = 0L
                 cursorUs = Long.MIN_VALUE
                 lastClickUs = Long.MIN_VALUE
                 if (track == null || track?.state != AudioTrack.STATE_INITIALIZED) {
@@ -48,6 +50,11 @@ class ClickTrack(
                         running = false
                         return
                     }
+                }
+                try {
+                    track?.pause()
+                    track?.flush()
+                } catch (_: Throwable) {
                 }
                 worker = Thread({ loop(mySession) }, "metronome-click").apply {
                     isDaemon = true
@@ -70,12 +77,14 @@ class ClickTrack(
                 track?.flush()
             } catch (_: Throwable) {
             }
+            framesWritten = 0L
             cursorUs = Long.MIN_VALUE
             lastClickUs = Long.MIN_VALUE
         }
     }
 
     fun onSeek() {
+        framesWritten = 0L
         cursorUs = Long.MIN_VALUE
         lastClickUs = Long.MIN_VALUE
         synchronized(lock) {
@@ -105,6 +114,7 @@ class ClickTrack(
                 val on = engine.enabled && snap.playing
                 val audio = synchronized(lock) { track }
                 if (!on || audio == null) {
+                    framesWritten = 0L
                     cursorUs = Long.MIN_VALUE
                     lastClickUs = Long.MIN_VALUE
                     try {
@@ -119,22 +129,25 @@ class ClickTrack(
                 }
                 val speed = snap.speed
                 val playhead = snap.positionUs.coerceAtLeast(0L)
-                val target = ClickClock.scheduledMediaUs(
+                val queuedMs = ClickClock.queuedLatencyMs(
+                    framesWritten,
+                    audio.playbackHeadPosition,
+                    ClickLayer.SAMPLE_RATE,
+                )
+                val bufferMs = ClickClock.outputLatencyMs(
+                    audio.bufferSizeInFrames,
+                    ClickLayer.SAMPLE_RATE,
+                )
+                val targetUs = ClickClock.scheduledMediaUs(
                     playhead,
                     speed,
-                    ClickClock.outputLatencyMs(audio.bufferSizeInFrames, ClickLayer.SAMPLE_RATE),
+                    ClickClock.writeLatencyMs(queuedMs, bufferMs),
                 )
-                val driftLimit = ClickLayer.lookaheadUs(speed) * 4
-                if (cursorUs == Long.MIN_VALUE || abs(target - cursorUs) > driftLimit) {
-                    try {
-                        audio.pause()
-                        audio.flush()
-                        audio.play()
-                    } catch (_: Throwable) {
-                    }
-                    cursorUs = target
-                    lastClickUs = Long.MIN_VALUE
-                }
+                cursorUs = ClickClock.nextWriteMediaUs(
+                    cursorUs,
+                    targetUs,
+                    ClickLayer.mediaAdvanceUs(speed),
+                )
                 chunk.clear()
                 chunk.limit(ClickLayer.chunkBytes())
                 lastClickUs = ClickLayer.render(
@@ -148,7 +161,7 @@ class ClickTrack(
                 chunk.limit(ClickLayer.chunkBytes())
                 audio.write(chunk, ClickLayer.chunkBytes(), AudioTrack.WRITE_BLOCKING)
                 if (!running || mySession != session) break
-                cursorUs += ClickLayer.mediaAdvanceUs(speed)
+                framesWritten += ClickLayer.chunkFrames()
             } catch (_: InterruptedException) {
                 break
             } catch (_: Throwable) {

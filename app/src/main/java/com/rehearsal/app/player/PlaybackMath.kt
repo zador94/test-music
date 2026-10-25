@@ -34,7 +34,8 @@ object PlaybackMath {
     fun clampMetronomeBpm(metronomeBpm: Float, committedOriginalBpm: Float): Float {
         val range = metronomeSliderRange(committedOriginalBpm)
         val value = if (metronomeBpm.isFinite()) metronomeBpm else range.start
-        return value.coerceIn(range.start, range.endInclusive)
+        val clamped = value.coerceIn(range.start, range.endInclusive)
+        return displayedBpm(clamped).toFloat().coerceIn(range.start, range.endInclusive)
     }
 
     /**
@@ -54,18 +55,27 @@ object PlaybackMath {
         raw.filter { it.isDigit() || it == '.' }.take(5)
 
     fun commitOriginalBpm(draft: String, committedBpm: Float): OriginalBpmCommit {
-        val parsed = parseOriginalBpm(draft)
-        val display = if (parsed != null) {
-            parsed.toInt().toString()
-        } else {
-            committedOriginalBpm(committedBpm).toInt().toString()
-        }
+        val parsed = parseOriginalBpm(draft)?.let { committedOriginalBpm(it) }
+        val display = (parsed ?: committedOriginalBpm(committedBpm)).toInt().toString()
         return OriginalBpmCommit(applyBpm = parsed, displayText = display)
+    }
+
+    /**
+     * UI shows [displayedBpm] (`toInt`). Grid and speed must use that same integer:
+     * OLS 102.8 with a «102» label was a 0.8 BPM rush.
+     */
+    fun displayedBpm(bpm: Float): Int {
+        if (!bpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM.toInt()
+        return bpm.toInt().coerceIn(
+            MetronomeClickEngine.MIN_BPM.toInt(),
+            MetronomeClickEngine.MAX_BPM.toInt(),
+        )
     }
 
     fun committedOriginalBpm(originalBpm: Float): Float {
         if (!originalBpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM
-        return originalBpm.coerceIn(MetronomeClickEngine.MIN_BPM, MetronomeClickEngine.MAX_BPM)
+        val clamped = originalBpm.coerceIn(MetronomeClickEngine.MIN_BPM, MetronomeClickEngine.MAX_BPM)
+        return displayedBpm(clamped).toFloat()
     }
 }
 
