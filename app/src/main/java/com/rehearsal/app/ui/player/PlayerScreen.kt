@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -38,18 +39,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.rehearsal.app.audio.MetronomeClickEngine
+import com.rehearsal.app.player.PlaybackMath
 import com.rehearsal.app.data.SplitKind
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
@@ -232,19 +240,43 @@ private fun Transport(
 
 @Composable
 private fun OriginalBpmField(text: String, onChange: (String) -> Unit) {
+    var draft by remember { mutableStateOf(text) }
+    var everFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(text) { draft = text }
+    val focus = LocalFocusManager.current
+    fun commit() {
+        onChange(draft)
+    }
     DawCard {
-        Text("Оригинальный BPM", fontWeight = FontWeight.SemiBold, color = Daw.text)
+        Text("Темп (оригинальный BPM)", fontWeight = FontWeight.SemiBold, color = Daw.text)
         OutlinedTextField(
-            value = text,
-            onValueChange = onChange,
-            modifier = Modifier.fillMaxWidth(),
+            value = draft,
+            onValueChange = { draft = PlaybackMath.sanitizeBpmDraft(it) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { state ->
+                    if (state.isFocused) {
+                        everFocused = true
+                    } else if (everFocused) {
+                        commit()
+                    }
+                },
             supportingText = {
                 Text(
-                    "Пока вручную, 30–240. Ошибка в числе сразу слышна: метроном будет не в доле.",
+                    "30–240. Пишите число, применится по Done или когда уйдёте из строки. Пока набираете — плеер не трогаем.",
                     color = Daw.muted,
                 )
             },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done,
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = {
+                    commit()
+                    focus.clearFocus()
+                },
+            ),
             singleLine = true,
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = Daw.accent,
@@ -287,13 +319,13 @@ private fun MetronomeBlock(
             )
         }
         Text("Желаемый BPM: ${ui.metronomeBpm.toInt()}", color = Daw.text)
-        val original = ui.originalBpmText.toFloatOrNull() ?: MetronomeClickEngine.DEFAULT_BPM
-        val min = (original * 0.5f).coerceAtLeast(MetronomeClickEngine.MIN_BPM)
-        val maxBpm = (original * 2.0f).coerceAtMost(MetronomeClickEngine.MAX_BPM)
+        val original = ui.originalBpm
+        val range = PlaybackMath.metronomeSliderRange(original)
+        val sliderValue = PlaybackMath.clampMetronomeBpm(ui.metronomeBpm, original)
         Slider(
-            value = ui.metronomeBpm.coerceIn(min, maxBpm),
+            value = sliderValue,
             onValueChange = onBpm,
-            valueRange = min..maxBpm,
+            valueRange = range,
             colors = SliderDefaults.colors(
                 thumbColor = Daw.drums,
                 activeTrackColor = Daw.drums,

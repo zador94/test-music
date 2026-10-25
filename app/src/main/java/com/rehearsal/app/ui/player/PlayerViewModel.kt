@@ -9,6 +9,8 @@ import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
 import com.rehearsal.app.player.MixerMath
+import com.rehearsal.app.player.PlaybackMath
+import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,6 +32,7 @@ data class PlayerUi(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val originalBpmText: String = "120",
+    val originalBpm: Float = MetronomeClickEngine.DEFAULT_BPM,
     val metronomeBpm: Float = 120f,
     val metronomeOn: Boolean = false,
     val speed: Float = 1f,
@@ -54,6 +57,7 @@ class PlayerViewModel(
     private var loadKey: String? = null
     private var bpmInitialized = false
     private var userPickedSource = false
+    private var userOverrodeOriginalBpm = false
 
     init {
         viewModelScope.launch {
@@ -67,12 +71,30 @@ class PlayerViewModel(
                     _ui.update {
                         it.copy(
                             originalBpmText = bpm.toInt().toString(),
+                            originalBpm = bpm,
                             metronomeBpm = bpm,
                             metronomeOn = false,
                             speed = playback.playbackSpeed(),
                         )
                     }
                     bpmInitialized = true
+                } else if (!userOverrodeOriginalBpm) {
+                    val detected = item.originalBpm
+                    val current = _ui.value.originalBpm
+                    if (detected != null && abs(detected - current) > 0.05f) {
+                        val followMetronome = abs(_ui.value.metronomeBpm - current) < 0.51f
+                        playback.setOriginalBpm(detected)
+                        if (followMetronome) playback.setMetronomeBpm(detected)
+                        playback.loadAnalysis(item)
+                        _ui.update {
+                            it.copy(
+                                originalBpmText = detected.toInt().toString(),
+                                originalBpm = playback.originalBpm,
+                                metronomeBpm = playback.metronomeBpm,
+                                speed = playback.playbackSpeed(),
+                            )
+                        }
+                    }
                 }
                 if (!userPickedSource && item.hasFourStems()) {
                     _ui.update { it.copy(useStems = true) }
@@ -82,6 +104,7 @@ class PlayerViewModel(
         }
         viewModelScope.launch {
             while (true) {
+                playback.applyPendingSpeed()
                 _ui.update {
                     it.copy(
                         playing = playback.isPlaying(),
@@ -101,18 +124,22 @@ class PlayerViewModel(
     fun seek(positionMs: Long) = playback.seekTo(positionMs)
 
     fun setOriginalBpmText(text: String) {
-        val filtered = text.filter { it.isDigit() || it == '.' }.take(5)
-        _ui.update { it.copy(originalBpmText = filtered) }
-        val value = filtered.toFloatOrNull() ?: return
-        if (value < MetronomeClickEngine.MIN_BPM || value > MetronomeClickEngine.MAX_BPM) return
-        playback.setOriginalBpm(value)
+        val commit = PlaybackMath.commitOriginalBpm(text, _ui.value.originalBpm)
+        if (commit.applyBpm == null) {
+            _ui.update { it.copy(originalBpmText = commit.displayText) }
+            return
+        }
+        userOverrodeOriginalBpm = true
+        playback.setOriginalBpm(commit.applyBpm)
         _ui.update {
             it.copy(
+                originalBpmText = commit.displayText,
+                originalBpm = playback.originalBpm,
                 metronomeBpm = playback.metronomeBpm,
                 speed = playback.playbackSpeed(),
             )
         }
-        viewModelScope.launch { app.repository.saveOriginalBpm(trackId, value) }
+        viewModelScope.launch { app.repository.saveOriginalBpm(trackId, commit.applyBpm) }
     }
 
     fun setMetronomeBpm(bpm: Float) {

@@ -12,6 +12,7 @@ import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.audio.RehearsalRenderersFactory
 import com.rehearsal.app.audio.StemMixBank
 import com.rehearsal.app.audio.StemMixMediaSource
+import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
 import java.io.File
@@ -31,7 +32,7 @@ class PlaybackEngine(context: Context) {
         .build()
 
     private val player: ExoPlayer = ExoPlayer.Builder(appContext)
-        .setRenderersFactory(RehearsalRenderersFactory(appContext, clicks))
+        .setRenderersFactory(RehearsalRenderersFactory(appContext, clicks, mixBank))
         .build()
         .apply {
             setAudioAttributes(audioAttributes, true)
@@ -42,6 +43,7 @@ class PlaybackEngine(context: Context) {
     private var stemsMode: Boolean = false
     private var loadedTrackId: String? = null
     private var appliedSpeed: Float = 1f
+    private val speedGate = PlaybackSpeedGate()
 
     var originalBpm: Float = MetronomeClickEngine.DEFAULT_BPM
         private set
@@ -70,7 +72,9 @@ class PlaybackEngine(context: Context) {
         player.stop()
         player.clearMediaItems()
         appliedSpeed = Float.NaN
+        speedGate.reset()
         clicks.onFlush()
+        loadAnalysis(track)
 
         if (canStems) {
             val files = mapOf(
@@ -114,20 +118,27 @@ class PlaybackEngine(context: Context) {
     }
 
     fun setOriginalBpm(bpm: Float) {
-        originalBpm = bpm.coerceIn(MetronomeClickEngine.MIN_BPM, MetronomeClickEngine.MAX_BPM)
+        originalBpm = PlaybackMath.committedOriginalBpm(bpm)
         clicks.originalBpm = originalBpm
-        metronomeBpm = metronomeBpm.coerceIn(minMetronomeBpm(), maxMetronomeBpm())
+        metronomeBpm = PlaybackMath.clampMetronomeBpm(metronomeBpm, originalBpm)
         applySpeed()
     }
 
     fun setMetronomeBpm(bpm: Float) {
-        metronomeBpm = bpm.coerceIn(minMetronomeBpm(), maxMetronomeBpm())
+        metronomeBpm = PlaybackMath.clampMetronomeBpm(bpm, originalBpm)
         applySpeed()
     }
 
     fun setMetronomeEnabled(enabled: Boolean) {
         // Только флаг кликов. Не stop/flush/prepare — иначе mid-play ON глушит ExoPlayer.
         clicks.enabled = enabled
+    }
+
+    fun loadAnalysis(track: TrackEntity) {
+        val dir = File(track.originalPath).parentFile
+        val file = dir?.let { File(it, TrackAnalysis.FILE_NAME) }
+        val analysis = if (file != null) TrackAnalysis.fromFile(file) else null
+        clicks.setAnalysis(analysis)
     }
 
     fun setStemGain(id: StemId, gain: Float) {
@@ -151,16 +162,28 @@ class PlaybackEngine(context: Context) {
 
     fun usingStems(): Boolean = stemsMode
 
+    fun applyPendingSpeed() {
+        val speed = speedGate.poll() ?: return
+        pushSpeed(speed)
+    }
+
     fun release() {
         mixBank.clear()
         player.release()
     }
 
     private fun applySpeed(force: Boolean = false) {
-        val speed = playbackSpeed()
-        if (!force && kotlin.math.abs(speed - appliedSpeed) < 0.0008f) return
+        val speed = speedGate.request(playbackSpeed(), force) ?: return
+        pushSpeed(speed)
+    }
+
+    private fun pushSpeed(speed: Float) {
         appliedSpeed = speed
-        player.setPlaybackSpeed(speed)
+        try {
+            player.setPlaybackSpeed(speed)
+        } catch (_: Throwable) {
+            // Не stop/pause и не роняем Activity.
+        }
     }
 
     private fun setMedia(uri: Uri) {

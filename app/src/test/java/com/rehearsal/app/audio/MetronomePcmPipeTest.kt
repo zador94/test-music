@@ -94,6 +94,33 @@ class MetronomePcmPipeTest {
     }
 
     @Test
+    fun speedDownDrainWhilePlayingDoesNotThrowOrSwallow() {
+        val engine = engine(enabled = true)
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(pcm16Format())
+        val sink = IdentityAudioSink(bytesPerAccept = 256)
+
+        var pts = 0L
+        repeat(3) {
+            val chunk = sinePcm16(frames = 512)
+            assertTrue(drain(pipe, chunk, pts, sink))
+            pts += 12_000L
+        }
+        sink.drainHoldCount = 6
+        val duringDown = sinePcm16(frames = 512)
+        val origin = duringDown.position()
+        val first = pipe.handleBuffer(duringDown, pts, 1, sink::handleBuffer)
+        assertFalse(first)
+        assertEquals("decoder must not be swallowed while Sonic-like drain holds", origin, duringDown.position())
+        assertTrue(drain(pipe, duringDown, pts, sink))
+        assertEquals(duringDown.limit(), duringDown.position())
+        pts += 12_000L
+        val after = sinePcm16(frames = 512)
+        assertTrue(drain(pipe, after, pts, sink))
+        assertFalse(sink.isAllZeros())
+    }
+
+    @Test
     fun submittedBufferIsNeverTheDecoderBuffer() {
         val engine = engine(enabled = false)
         val pipe = MetronomePcmPipe(engine)
@@ -221,6 +248,7 @@ class MetronomePcmPipeTest {
 private class IdentityAudioSink(var bytesPerAccept: Int) {
     private var pending: ByteBuffer? = null
     val submitted = ArrayList<ByteArray>()
+    var drainHoldCount: Int = 0
 
     fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
         val held = pending
@@ -228,6 +256,11 @@ private class IdentityAudioSink(var bytesPerAccept: Int) {
             throw IllegalArgumentException(
                 "DefaultAudioSink requires the same ByteBuffer until consumed",
             )
+        }
+        if (drainHoldCount > 0) {
+            drainHoldCount--
+            pending = buffer
+            return false
         }
         pending = buffer
         val consume = minOf(buffer.remaining(), bytesPerAccept)

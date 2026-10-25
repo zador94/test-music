@@ -22,6 +22,8 @@ class PlaybackMathTest {
     fun zeroOriginalBpmFallsBackToOne() {
         assertEquals(1.0f, PlaybackMath.playbackSpeed(120f, 0f), 1e-5f)
         assertEquals(1.0f, PlaybackMath.playbackSpeed(120f, -10f), 1e-5f)
+        assertEquals(1.0f, PlaybackMath.playbackSpeed(120f, Float.NaN), 1e-5f)
+        assertEquals(1.0f, PlaybackMath.playbackSpeed(Float.POSITIVE_INFINITY, 120f), 1e-5f)
     }
 
     @Test

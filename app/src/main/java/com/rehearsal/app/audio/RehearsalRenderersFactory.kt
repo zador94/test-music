@@ -7,11 +7,13 @@ import androidx.media3.exoplayer.audio.AudioSink
 class RehearsalRenderersFactory(
     context: Context,
     private val clickEngine: MetronomeClickEngine,
+    private val mixBank: StemMixBank,
 ) : DefaultRenderersFactory(context) {
 
     init {
         setEnableAudioFloatOutput(false)
-        setEnableAudioTrackPlaybackParams(false)
+        // Скорость на AudioTrack, не Sonic drain: слайдер вниз больше не глушит sink.
+        setEnableAudioTrackPlaybackParams(true)
         setEnableDecoderFallback(true)
     }
 
@@ -23,8 +25,8 @@ class RehearsalRenderersFactory(
         val sink = super.buildAudioSink(
             context,
             /* enableFloatOutput = */ false,
-            /* enableAudioTrackPlaybackParams = */ false,
+            /* enableAudioTrackPlaybackParams = */ true,
         ) ?: error("AudioSink недоступен")
-        return MetronomeAudioSink(sink, clickEngine)
+        return MetronomeAudioSink(sink, clickEngine, mixBank)
     }
 }

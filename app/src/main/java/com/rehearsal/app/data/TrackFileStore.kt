@@ -1,6 +1,7 @@
 package com.rehearsal.app.data
 
 import android.content.Context
+import com.rehearsal.app.audio.TrackAnalysis
 import org.json.JSONObject
 import java.io.File
 
@@ -39,6 +40,12 @@ class TrackFileStore(private val context: Context) {
     fun otherWav(id: String): File = stemWav(id, StemId.OTHER)
 
     fun metaJson(id: String): File = File(trackDir(id), "meta.json")
+
+    fun analysisJson(id: String): File = File(trackDir(id), TrackAnalysis.FILE_NAME)
+
+    fun writeAnalysis(id: String, analysis: TrackAnalysis) {
+        analysisJson(id).writeText(analysis.toJson())
+    }
 
     fun stemReadme(id: String): File = File(stemsDir(id), "README.txt")
 

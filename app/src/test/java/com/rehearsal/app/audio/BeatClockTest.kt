@@ -34,4 +34,18 @@ class BeatClockTest {
         )
         assertEquals(333_333L, BeatClock.intervalUs(metronomeBpm))
     }
+
+    @Test
+    fun firstIndexAtOrAfterIsBinarySearchOnBeats() {
+        val beats = longArrayOf(0L, 400_000L, 900_000L, 1_500_000L)
+        assertEquals(0, BeatClock.firstIndexAtOrAfter(beats, 0L))
+        assertEquals(1, BeatClock.firstIndexAtOrAfter(beats, 1L))
+        assertEquals(1, BeatClock.firstIndexAtOrAfter(beats, 400_000L))
+        assertEquals(2, BeatClock.firstIndexAtOrAfter(beats, 400_001L))
+        assertEquals(4, BeatClock.firstIndexAtOrAfter(beats, 1_500_001L))
+        assertEquals(
+            3,
+            BeatClock.firstOverlappingIndex(beats, 1_200_000L, 18_000L),
+        )
+    }
 }

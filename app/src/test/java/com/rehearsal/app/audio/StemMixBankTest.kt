@@ -48,6 +48,50 @@ class StemMixBankTest {
     }
 
     @Test
+    fun muteWithoutLiveRemixLeavesQueuedChunkUnchanged() {
+        val bank = StemMixBank()
+        bank.load(WavFixtures.writeStemSet(tmp.newFolder("queued")))
+        val queued = render(bank)
+        val before = rms(queued)
+        bank.setGain(StemId.VOCALS, 0f)
+        val engine = MetronomeClickEngine()
+        engine.enabled = false
+        val stale = ClickMix.copyAndMix(queued.duplicate(), ByteBuffer.allocateDirect(0), engine, 0L)
+        assertEquals("MediaSource queue keeps old gains until sink remix", before, rms(stale), 1e-4)
+        bank.clear()
+    }
+
+    @Test
+    fun liveRemixAppliesMuteOnTheSameQueuedBuffer() {
+        val bank = StemMixBank()
+        bank.load(WavFixtures.writeStemSet(tmp.newFolder("live")))
+        StemId.entries.forEach { bank.setGain(it, 1f) }
+        val queued = render(bank)
+        val before = rms(queued)
+        bank.setGain(StemId.VOCALS, 0f)
+        val engine = MetronomeClickEngine()
+        engine.configure(
+            androidx.media3.common.Format.Builder()
+                .setSampleMimeType(androidx.media3.common.MimeTypes.AUDIO_RAW)
+                .setPcmEncoding(C.ENCODING_PCM_16BIT)
+                .setSampleRate(44100)
+                .setChannelCount(2)
+                .build(),
+        )
+        engine.enabled = false
+        val live = ClickMix.copyAndMix(
+            queued.duplicate(),
+            ByteBuffer.allocateDirect(0),
+            engine,
+            0L,
+            bank,
+        )
+        assertTrue("live remix must apply mute on this buffer, not after 1s", rms(live) < before * 0.9)
+        assertFalse(isSilent(live))
+        bank.clear()
+    }
+
+    @Test
     fun muteAllStemsIsSilence() {
         val bank = StemMixBank()
         bank.load(WavFixtures.writeStemSet(tmp.newFolder("stems")))

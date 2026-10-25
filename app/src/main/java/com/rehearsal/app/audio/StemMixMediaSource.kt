@@ -110,7 +110,11 @@ class StemMixMediaSource(
         override fun getAdjustedSeekPositionUs(positionUs: Long, seekParameters: SeekParameters): Long =
             positionUs.coerceIn(0L, durationUs)
 
-        override fun getBufferedPositionUs(): Long = C.TIME_END_OF_SOURCE
+        override fun getBufferedPositionUs(): Long {
+            if (streams.isEmpty()) return 0L
+            val chunkUs = CHUNK_FRAMES * C.MICROS_PER_SECOND / mixBank.sampleRate.coerceAtLeast(1)
+            return streams.minOf { (it.mediaPositionUs() + chunkUs * 2L).coerceAtMost(durationUs) }
+        }
 
         override fun getNextLoadPositionUs(): Long = C.TIME_END_OF_SOURCE
 
@@ -134,6 +138,8 @@ class StemMixMediaSource(
             positionBytes = byteCount(positionUs, mixBank.sampleRate, frameSize)
                 .coerceIn(0L, durationBytes)
         }
+
+        fun mediaPositionUs(): Long = positionUs(positionBytes, mixBank.sampleRate, frameSize)
 
         override fun isReady(): Boolean = true
 

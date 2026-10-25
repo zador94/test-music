@@ -18,6 +18,9 @@ import com.rehearsal.app.RehearsalApplication
 import com.rehearsal.app.audio.AudioBuffers
 import com.rehearsal.app.audio.HtDemucs
 import com.rehearsal.app.audio.HtdemucsModelStore
+import com.rehearsal.app.audio.StereoPcm
+import com.rehearsal.app.audio.TempoDetector
+import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.audio.WavWriter
 import com.rehearsal.app.data.SplitKind
 import com.rehearsal.app.data.StemId
@@ -84,6 +87,9 @@ class StemSplitWorker(
 
             report(22, "Декодирую исходник в 44.1 кГц stereo")
             val mix = AudioBuffers.decodeToStereo44100(original)
+            report(25, "Считаю BPM и доли")
+            persistAnalysis(dao, files, trackId, mix)
+
             report(28, "HT-Demucs считает стемы. Минуты, телефон греется.")
 
             val separated = HtDemucs.separate(mix, model) { index, total ->
@@ -132,6 +138,22 @@ class StemSplitWorker(
             stemFiles.values.forEach { it.delete() }
             return fail(dao, files, trackId, t.message ?: t.javaClass.simpleName)
         }
+    }
+
+    private suspend fun persistAnalysis(
+        dao: TrackDao,
+        files: TrackFileStore,
+        trackId: String,
+        mix: StereoPcm,
+    ) {
+        val analysis = try {
+            TempoDetector.analyze(mix)
+        } catch (_: Throwable) {
+            TrackAnalysis.fallbackGrid(mix.samples, mix.sampleRate)
+        }
+        files.writeAnalysis(trackId, analysis)
+        dao.updateBpm(trackId, analysis.bpm, System.currentTimeMillis())
+        dao.getById(trackId)?.let { files.writeMeta(it) }
     }
 
     private suspend fun markProcessing(dao: TrackDao, files: TrackFileStore, trackId: String) {

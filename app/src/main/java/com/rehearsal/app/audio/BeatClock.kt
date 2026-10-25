@@ -50,4 +50,28 @@ object BeatClock {
         val delta = mediaUsToSample(eventUs, sampleRate) - mediaUsToSample(bufferStartUs, sampleRate)
         return delta.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
     }
+
+    /** Нижний индекс в отсортированном [timesUs] с временем ≥ [timeUs]. */
+    fun firstIndexAtOrAfter(timesUs: LongArray, timeUs: Long): Int {
+        var lo = 0
+        var hi = timesUs.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (timesUs[mid] < timeUs) lo = mid + 1 else hi = mid
+        }
+        return lo
+    }
+
+    /**
+     * Первая метка `beats[i]`, чей клик ещё пересекает [mediaStartUs].
+     * Не «догоняем через секунду» — ближайшая доля в текущем PCM-буфере.
+     */
+    fun firstOverlappingIndex(
+        timesUs: LongArray,
+        mediaStartUs: Long,
+        clickDurationUs: Long,
+    ): Int {
+        val earliest = mediaStartUs - clickDurationUs.coerceAtLeast(1L) + 1L
+        return firstIndexAtOrAfter(timesUs, earliest)
+    }
 }

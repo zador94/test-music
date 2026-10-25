@@ -15,6 +15,7 @@ import java.nio.ByteOrder
  */
 class MetronomePcmPipe(
     private val clickEngine: MetronomeClickEngine,
+    private val mixBank: StemMixBank? = null,
 ) {
     private var mixBuffer: ByteBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.LITTLE_ENDIAN)
     private var retryBuffer: ByteBuffer? = null
@@ -46,7 +47,13 @@ class MetronomePcmPipe(
         val toWrite = if (retryBuffer != null && presentationTimeUs == retryPts) {
             retryBuffer!!
         } else {
-            val mixed = ClickMix.copyAndMix(source, mixBuffer, clickEngine, presentationTimeUs)
+            val mixed = ClickMix.copyAndMix(
+                source,
+                mixBuffer,
+                clickEngine,
+                presentationTimeUs,
+                mixBank,
+            )
             mixBuffer = mixed
             retryBuffer = mixed
             retryPts = presentationTimeUs
@@ -80,6 +87,7 @@ object ClickMix {
         dest: ByteBuffer,
         engine: MetronomeClickEngine,
         presentationTimeUs: Long,
+        mixBank: StemMixBank? = null,
     ): ByteBuffer {
         val remaining = source.remaining()
         val out = if (dest.capacity() < remaining) {
@@ -88,9 +96,16 @@ object ClickMix {
             dest.order(ByteOrder.LITTLE_ENDIAN)
         }
         out.clear()
-        val dup = source.asReadOnlyBuffer()
-        out.put(dup)
-        out.flip()
+        if (mixBank != null && mixBank.active) {
+            out.limit(remaining)
+            mixBank.render(out, engine.encoding, engine.channelCount, presentationTimeUs)
+            out.position(0)
+            out.limit(remaining)
+        } else {
+            val dup = source.asReadOnlyBuffer()
+            out.put(dup)
+            out.flip()
+        }
         if (engine.enabled && engine.isPcm()) {
             engine.mixInPlace(out, presentationTimeUs)
             out.position(0)
