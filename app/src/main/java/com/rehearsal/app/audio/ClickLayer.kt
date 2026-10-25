@@ -4,12 +4,12 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Отдельный слой клика, как Web Audio node: не внутри stem PCM.
- * Всегда stereo 16-bit native @ 44.1 kHz. Gain «раз» 2.2, остальные доли тише;
- * downbeat длиннее/ниже, остальные короче/выше.
+ * Отдельный слой клика: не внутри stem PCM.
+ * Всегда stereo 16-bit native @ 44.1 kHz. Один короткий клик на четверть,
+ * без сильной/слабой доли.
  *
- * Буфер — wall time (как AudioContext). Media time = playhead + wall * speed.
- * Lookahead веб-контракта: [LOOKAHEAD_SEC] * playbackRate секунд song time
+ * Буфер — wall time. Media time = playhead + wall * speed.
+ * Lookahead: [LOOKAHEAD_SEC] * playbackRate секунд song time
  * при chunk = LOOKAHEAD_SEC wall.
  */
 object ClickLayer {

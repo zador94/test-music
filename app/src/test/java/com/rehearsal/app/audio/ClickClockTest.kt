@@ -73,6 +73,26 @@ class ClickClockTest {
     }
 
     @Test
+    fun outputLatencyMsFromBufferSize() {
+        assertEquals(80, ClickClock.outputLatencyMs(bufferSizeInFrames = 3528, sampleRate = 44100))
+        assertEquals(0, ClickClock.outputLatencyMs(bufferSizeInFrames = 0, sampleRate = 44100))
+        assertEquals(ClickClock.MAX_OUTPUT_LATENCY_MS, ClickClock.outputLatencyMs(1_000_000, 44100))
+    }
+
+    @Test
+    fun scheduledCursorAddsOutputLatencyInMediaTime() {
+        assertEquals(80_000L, ClickClock.scheduledMediaUs(0L, speed = 1f, outputLatencyMs = 80))
+        assertEquals(160_000L, ClickClock.scheduledMediaUs(0L, speed = 2f, outputLatencyMs = 80))
+        assertEquals(1_040_000L, ClickClock.scheduledMediaUs(1_000_000L, speed = 0.5f, outputLatencyMs = 80))
+        assertEquals(
+            0L,
+            ClickClock.scheduledMediaUs(0L, speed = 1f, outputLatencyMs = -12),
+        )
+        val capped = ClickClock.scheduledMediaUs(0L, speed = 1f, outputLatencyMs = 10_000)
+        assertEquals(ClickClock.MAX_OUTPUT_LATENCY_MS * 1_000L, capped)
+    }
+
+    @Test
     fun nonFiniteSpeedFallsBackToOne() {
         val origin = ClickClock.Origin(mediaUs = 0L, wallNs = 0L, speed = Float.NaN, playing = true)
         val snap = ClickClock.snapshot(origin, nowNs = 1_000_000_000L)

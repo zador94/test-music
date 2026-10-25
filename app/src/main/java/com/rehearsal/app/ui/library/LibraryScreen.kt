@@ -54,6 +54,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.rehearsal.app.data.SplitKind
 import com.rehearsal.app.data.TrackEntity
 import com.rehearsal.app.data.TrackStatus
+import com.rehearsal.app.player.PlaybackPolicy
 import com.rehearsal.app.ui.theme.Daw
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -142,8 +143,8 @@ fun LibraryScreen(
                     TrackCard(
                         track = track,
                         onClick = {
-                            if (track.isWorking) onOpenProcessing(track.id)
-                            else onOpenPlayer(track.id)
+                            if (PlaybackPolicy.opensPlayer(track)) onOpenPlayer(track.id)
+                            else onOpenProcessing(track.id)
                         },
                         onDelete = { vm.delete(track.id) },
                     )

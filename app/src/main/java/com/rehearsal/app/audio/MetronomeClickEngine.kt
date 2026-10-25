@@ -7,18 +7,21 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.round
 import kotlin.math.sin
 
 /**
- * Слой клика (Web Audio node): [renderLayer] в отдельный PCM, не в stem mix.
- * `beats[]` в media time; без analysis — равная сетка [BeatClock].
- * Lookahead задаёт [ClickLayer] (0.12s wall × speed). Handler-таймера нет.
+ * Слой клика: [renderLayer] в отдельный PCM, не в stem mix.
+ * Ровные четверти по [BeatClock] на original BPM; origin — downbeatOffset анализа.
+ * Неровный `beats[]` метроном не играет: из‑за snap к пикам это были не четверти
+ * и не тот темп, что на слайдере. Handler-таймера нет.
  */
 class MetronomeClickEngine {
     @Volatile var enabled: Boolean = false
     @Volatile var originalBpm: Float = DEFAULT_BPM
-    @Volatile private var beatTimesUs: LongArray = EmptyBeats
+    @Volatile var gridOriginUs: Long = 0L
+        private set
 
     var sampleRate: Int = ClickLayer.SAMPLE_RATE
         private set
@@ -28,8 +31,7 @@ class MetronomeClickEngine {
         private set
 
     private var bytesPerSample: Int = 2
-    private val downbeat: FloatArray = synthesizeDownbeat(ClickLayer.SAMPLE_RATE)
-    private val beatClick: FloatArray = synthesizeBeat(ClickLayer.SAMPLE_RATE)
+    private val click: FloatArray = synthesizeClick(ClickLayer.SAMPLE_RATE)
 
     fun configure(format: Format) {
         sampleRate = format.sampleRate.takeIf { it > 0 } ?: ClickLayer.SAMPLE_RATE
@@ -48,29 +50,16 @@ class MetronomeClickEngine {
 
     fun isPcm(): Boolean = bytesPerSample > 0
 
-    fun hasBeatTimes(): Boolean = beatTimesUs.isNotEmpty()
-
-    fun clickDurationUs(): Long {
-        val n = maxOf(downbeat.size, beatClick.size)
-        return n.toLong() * 1_000_000L / ClickLayer.SAMPLE_RATE
-    }
+    fun clickDurationUs(): Long =
+        click.size.toLong() * 1_000_000L / ClickLayer.SAMPLE_RATE
 
     fun setAnalysis(analysis: TrackAnalysis?) {
-        if (analysis == null || analysis.beats.isEmpty()) {
-            beatTimesUs = EmptyBeats
-            return
-        }
-        beatTimesUs = analysis.beatTimesUs()
+        val originSec = analysis?.downbeatOffset ?: 0.0
+        gridOriginUs = TempoMath.secondsToMediaUs(originSec)
     }
 
-    fun setBeatTimesUs(timesUs: LongArray) {
-        if (timesUs.isEmpty()) {
-            beatTimesUs = EmptyBeats
-            return
-        }
-        val copy = timesUs.copyOf()
-        copy.sort()
-        beatTimesUs = copy
+    fun setGridOriginUs(originUs: Long) {
+        gridOriginUs = originUs.coerceAtLeast(0L)
     }
 
     /**
@@ -99,52 +88,20 @@ class MetronomeClickEngine {
         val startUs = if (mediaStartUs == C.TIME_UNSET || mediaStartUs < 0L) 0L else mediaStartUs
         val endUs = startUs + mediaDurationUs
         val clickMediaUs = (clickDurationUs() * speedSafe.toDouble()).toLong().coerceAtLeast(1L)
-        val beats = beatTimesUs
-        var last = fromExclusiveUs
-        if (beats.isNotEmpty()) {
-            last = paintFromTimes(out, origin, frames, startUs, endUs, clickMediaUs, speedSafe, beats, fromExclusiveUs)
-        } else {
-            last = paintEqualGrid(
-                out,
-                origin,
-                frames,
-                startUs,
-                endUs,
-                clickMediaUs,
-                speedSafe,
-                BeatClock.intervalUs(bpm),
-                fromExclusiveUs,
-            )
-        }
+        val last = paintEqualGrid(
+            out,
+            origin,
+            frames,
+            startUs,
+            endUs,
+            clickMediaUs,
+            speedSafe,
+            BeatClock.intervalUs(bpm),
+            gridOriginUs,
+            fromExclusiveUs,
+        )
         out.position(origin)
         out.limit(origin + frames * ClickLayer.BYTES_PER_FRAME)
-        return last
-    }
-
-    private fun paintFromTimes(
-        buffer: ByteBuffer,
-        origin: Int,
-        frames: Int,
-        startUs: Long,
-        endUs: Long,
-        clickMediaUs: Long,
-        speed: Float,
-        times: LongArray,
-        fromExclusiveUs: Long,
-    ): Long {
-        var i = BeatClock.firstOverlappingIndex(times, startUs, clickMediaUs)
-        var last = fromExclusiveUs
-        var guard = 0
-        while (i < times.size && guard < MAX_BEATS_PER_BUFFER) {
-            val beatUs = times[i]
-            if (beatUs >= endUs) break
-            if (beatUs > fromExclusiveUs) {
-                paintClick(buffer, origin, frames, startUs, beatUs, beatIndex = i, speed = speed)
-                last = maxOf(last, beatUs)
-            }
-            i++
-            guard++
-        }
         return last
     }
 
@@ -157,18 +114,18 @@ class MetronomeClickEngine {
         clickMediaUs: Long,
         speed: Float,
         intervalUs: Long,
+        gridOriginUs: Long,
         fromExclusiveUs: Long,
     ): Long {
-        var beatUs = BeatClock.firstOverlappingBeatUs(startUs, intervalUs, clickMediaUs)
+        var beatUs = BeatClock.firstOverlappingBeatUs(startUs, intervalUs, clickMediaUs, gridOriginUs)
         var last = fromExclusiveUs
         var guard = 0
         while (guard < MAX_BEATS_PER_BUFFER) {
             if (beatUs >= endUs) break
-            val beatIndex = if (intervalUs > 0L) (beatUs / intervalUs).toInt() else 0
             val startFrame = wallFrame(beatUs, startUs, speed)
             if (startFrame >= frames && beatUs > startUs) break
             if (beatUs > fromExclusiveUs) {
-                paintClick(buffer, origin, frames, startUs, beatUs, beatIndex, speed)
+                paintClick(buffer, origin, frames, startUs, beatUs, speed)
                 last = maxOf(last, beatUs)
             }
             val next = beatUs + intervalUs
@@ -185,27 +142,22 @@ class MetronomeClickEngine {
         frames: Int,
         startUs: Long,
         beatUs: Long,
-        beatIndex: Int,
         speed: Float,
     ) {
         val startFrame = wallFrame(beatUs, startUs, speed)
-        val wave = if (beatIndex % BEATS_PER_BAR == 0) downbeat else beatClick
         val clickOffset = if (startFrame < 0) -startFrame else 0
         val frame = if (startFrame < 0) 0 else startFrame
-        if (clickOffset >= wave.size || frame >= frames) return
-        val gain = clickGain(beatIndex)
+        if (clickOffset >= click.size || frame >= frames) return
         var i = clickOffset
         var f = frame
-        while (i < wave.size && f < frames) {
-            writeShortFrame(buffer, origin, f, wave[i] * gain)
+        while (i < click.size && f < frames) {
+            writeShortFrame(buffer, origin, f, click[i] * CLICK_GAIN)
             i++
             f++
         }
     }
 
     private fun wallFrame(beatUs: Long, startUs: Long, speed: Float): Int {
-        // Sample-domain, not (beatUs - startUs) then convert: chunked 512-frame
-        // buffers must land on the same frame as a single whole-buffer render.
         val mediaFrame = BeatClock.frameOffset(beatUs, startUs, ClickLayer.SAMPLE_RATE)
         if (speed == 1f) return mediaFrame
         return round(mediaFrame / speed.toDouble()).toInt()
@@ -254,53 +206,34 @@ class MetronomeClickEngine {
         const val DEFAULT_BPM = 120f
         const val MIN_BPM = 30f
         const val MAX_BPM = 240f
-        const val BEATS_PER_BAR = 4
-        /** Как веб: master gain ~2.2 на «раз», иначе клик тонет в барабанах. */
-        const val DOWNBEAT_GAIN = 2.2f
-        const val BEAT_GAIN = 1.65f
+        const val CLICK_GAIN = 1f
+        const val CLICK_PEAK = 0.92f
+        const val CLICK_DURATION_SEC = 0.006
         private const val MAX_BEATS_PER_BUFFER = 10_000
-        private val EmptyBeats = LongArray(0)
-
-        fun clickGain(beatIndex: Int): Float =
-            if (beatIndex % BEATS_PER_BAR == 0) DOWNBEAT_GAIN else BEAT_GAIN
 
         /**
-         * Пик волны = 1/DOWNBEAT_GAIN, чтобы «раз» × 2.2 = full-scale,
-         * остальные × 1.65 тише (~0.75) и не упирались в тот же клип.
+         * Один короткий клик на каждую четверть. Без «раза» и без смены тембра.
          */
+        fun synthesizeClick(sampleRate: Int): FloatArray {
+            val sr = sampleRate.coerceAtLeast(1)
+            val n = (sr * CLICK_DURATION_SEC).toInt().coerceAtLeast(32)
+            val f0 = 2000.0
+            val f1 = 4500.0
+            val tau = 0.0010
+            val raw = FloatArray(n) { i ->
+                val t = i.toDouble() / sr
+                val env = exp(-t / tau)
+                val s = (sin(2.0 * PI * f0 * t) + 0.45 * sin(2.0 * PI * f1 * t)) * env
+                s.toFloat()
+            }
+            return peakNormalize(raw, CLICK_PEAK)
+        }
+
         private fun peakNormalize(wave: FloatArray, peak: Float): FloatArray {
             var max = 1e-9f
             for (s in wave) max = maxOf(max, abs(s))
             val g = peak / max
             return FloatArray(wave.size) { i -> wave[i] * g }
-        }
-
-        /** Доля «раз»: длиннее и ниже. */
-        fun synthesizeDownbeat(sampleRate: Int): FloatArray {
-            val n = (sampleRate * 0.028).toInt().coerceAtLeast(64)
-            val f0 = 980.0
-            val f1 = 1470.0
-            val raw = FloatArray(n) { i ->
-                val env = sin(PI * i / n)
-                val t = i.toDouble() / sampleRate
-                val s = (sin(2.0 * PI * f0 * t) + 0.35 * sin(2.0 * PI * f1 * t)) * env
-                s.toFloat()
-            }
-            return peakNormalize(raw, 1f / DOWNBEAT_GAIN)
-        }
-
-        /** Остальные доли: короче и выше. */
-        fun synthesizeBeat(sampleRate: Int): FloatArray {
-            val n = (sampleRate * 0.012).toInt().coerceAtLeast(48)
-            val f0 = 2450.0
-            val f1 = 3200.0
-            val raw = FloatArray(n) { i ->
-                val env = sin(PI * i / n)
-                val t = i.toDouble() / sampleRate
-                val s = (sin(2.0 * PI * f0 * t) + 0.4 * sin(2.0 * PI * f1 * t)) * env
-                s.toFloat()
-            }
-            return peakNormalize(raw, 1f / DOWNBEAT_GAIN)
         }
     }
 }

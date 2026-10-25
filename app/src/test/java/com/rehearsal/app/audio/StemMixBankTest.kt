@@ -122,7 +122,6 @@ class StemMixBankTest {
         val off = pcm16Engine(enabled = false)
         val on = pcm16Engine(enabled = true)
         on.originalBpm = 120f
-        on.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val queued = render(bank)
         val stemsOnly = ClickMix.copyAndMix(queued.duplicate(), ByteBuffer.allocateDirect(0), off, 0L, bank)
         val withFlag = ClickMix.copyAndMix(queued.duplicate(), ByteBuffer.allocateDirect(0), on, 0L, bank)
@@ -140,7 +139,6 @@ class StemMixBankTest {
         bank.load(WavFixtures.writeStemSet(tmp.newFolder("muted-click")))
         StemId.entries.forEach { bank.setGain(it, 0f) }
         val engine = pcm16Engine(enabled = true)
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val stems = render(bank)
         assertTrue("muted stems are silence", isSilent(stems))
         val mixed = ClickMix.copyAndMix(stems.duplicate(), ByteBuffer.allocateDirect(0), engine, 0L, bank)
@@ -158,7 +156,7 @@ class StemMixBankTest {
     fun metronomeGridClicksWhenBeatsArrayEmpty() {
         val engine = pcm16Engine(enabled = true)
         engine.originalBpm = 120f
-        engine.setBeatTimesUs(longArrayOf())
+        engine.setAnalysis(null)
         val layer = ByteBuffer.allocateDirect(44100 * 4).order(ByteOrder.nativeOrder())
         layer.limit(44100 * 4)
         ClickLayer.render(layer, engine, 0L, 1f)

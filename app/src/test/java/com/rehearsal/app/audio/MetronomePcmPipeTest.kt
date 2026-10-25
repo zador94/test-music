@@ -148,7 +148,7 @@ class MetronomePcmPipeTest {
         StemId.entries.forEach { bank.setGain(it, 0.12f) }
         val off = engine(enabled = false)
         val on = engine(enabled = true)
-        on.setBeatTimesUs(longArrayOf(0L, 500_000L))
+        on.originalBpm = 120f
         val source = renderBank(bank)
 
         val offPipe = MetronomePcmPipe(off, bank)
@@ -180,7 +180,7 @@ class MetronomePcmPipeTest {
     @Test
     fun timeUnsetStillMixesClickEnergy() {
         val engine = engine(enabled = true)
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
+        engine.originalBpm = 120f
         val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
         layer.limit(1024 * 4)
         ClickLayer.render(layer, engine, C.TIME_UNSET, 1f)
@@ -215,7 +215,6 @@ class MetronomePcmPipeTest {
         )
         engine.originalBpm = 120f
         engine.enabled = true
-        engine.setBeatTimesUs(longArrayOf(0L))
         val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
         layer.limit(1024 * 4)
         ClickLayer.render(layer, engine, 0L, 1f)

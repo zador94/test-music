@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +35,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.work.WorkInfo
 import com.rehearsal.app.data.TrackStatus
+import com.rehearsal.app.player.PlaybackPolicy
 import com.rehearsal.app.ui.theme.Daw
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -47,6 +49,13 @@ fun ProcessingScreen(
     val progress by vm.progress.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     val workState by vm.workState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(track) {
+        val item = track ?: return@LaunchedEffect
+        if (PlaybackPolicy.opensPlayer(item)) {
+            onOpenPlayer(item.id)
+        }
+    }
 
     Scaffold(
         containerColor = Daw.bg,
@@ -146,11 +155,13 @@ fun ProcessingScreen(
             }
 
             Spacer(Modifier.height(4.dp))
-            DawAction(
-                label = "Слушать оригинал",
-                filled = true,
-                onClick = { onOpenPlayer(vm.trackId) },
-            )
+            if (track?.let { PlaybackPolicy.opensPlayer(it) } == true) {
+                DawAction(
+                    label = "Открыть плеер",
+                    filled = true,
+                    onClick = { onOpenPlayer(vm.trackId) },
+                )
+            }
             if (track?.status == TrackStatus.ERROR) {
                 DawAction(
                     label = "Повторить разделение",

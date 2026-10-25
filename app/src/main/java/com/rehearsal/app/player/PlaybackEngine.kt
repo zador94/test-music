@@ -1,8 +1,6 @@
 package com.rehearsal.app.player
 
 import android.content.Context
-import android.net.Uri
-import androidx.core.net.toUri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
@@ -20,8 +18,9 @@ import com.rehearsal.app.data.TrackEntity
 import java.io.File
 
 /**
- * Один ExoPlayer. Оригинал — файл. Стемы — [StemMixMediaSource] (PCM 16-bit из bank).
- * Клики метронома — отдельный [ClickTrack] (как Web Audio node), не mix в stem PCM.
+ * Один ExoPlayer, только стемы: [StemMixMediaSource] (PCM 16-bit из bank).
+ * Импортированный mix не ставится, даже если четырёх WAV нет.
+ * Клики метронома — отдельный [ClickTrack], ровные четверти, один клик.
  * speed = metronomeBpm / originalBpm.
  */
 class PlaybackEngine(context: Context) {
@@ -43,7 +42,7 @@ class PlaybackEngine(context: Context) {
             disableOffload()
         }
 
-    private val clickTrack = ClickTrack(clicks, ::clickClock)
+    private val clickTrack = ClickTrack(clicks, ::clickClock) { player.audioSessionId }
     @Volatile private var clickOrigin = ClickClock.Origin()
 
     private var stemsMode: Boolean = false
@@ -73,13 +72,12 @@ class PlaybackEngine(context: Context) {
         })
     }
 
-    fun load(track: TrackEntity, preferStems: Boolean) {
-        val canStems = preferStems && track.hasFourStems()
+    fun load(track: TrackEntity) {
         val sameTrack = loadedTrackId == track.id
         val resumeMs = if (sameTrack) player.currentPosition else 0L
         val keepPlaying = player.playWhenReady
         loadedTrackId = track.id
-        stemsMode = canStems
+        stemsMode = false
 
         player.stop()
         player.clearMediaItems()
@@ -87,31 +85,34 @@ class PlaybackEngine(context: Context) {
         speedGate.reset()
         clicks.onFlush()
         clickTrack.onSeek()
+        mixBank.clear()
         loadAnalysis(track)
 
-        if (canStems) {
-            val files = mapOf(
-                StemId.VOCALS to File(track.vocalsPath!!),
-                StemId.DRUMS to File(track.drumsPath!!),
-                StemId.BASS to File(track.bassPath!!),
-                StemId.OTHER to File(track.otherPath!!),
-            )
-            try {
-                mixBank.load(files)
-                player.setMediaSource(StemMixMediaSource(mixBank))
-            } catch (_: Throwable) {
-                mixBank.clear()
-                stemsMode = false
-                setMedia(File(track.originalPath).toUri())
-            }
-        } else {
-            mixBank.clear()
-            setMedia(File(track.originalPath).toUri())
+        if (!PlaybackPolicy.canStartPlayback(track)) {
+            captureClickClock()
+            return
         }
-        player.prepare()
-        player.seekTo(resumeMs)
-        applySpeed(force = true)
-        player.playWhenReady = keepPlaying
+
+        val files = mapOf(
+            StemId.VOCALS to File(track.vocalsPath!!),
+            StemId.DRUMS to File(track.drumsPath!!),
+            StemId.BASS to File(track.bassPath!!),
+            StemId.OTHER to File(track.otherPath!!),
+        )
+        try {
+            mixBank.load(files)
+            player.setMediaSource(StemMixMediaSource(mixBank))
+            stemsMode = true
+            player.prepare()
+            player.seekTo(resumeMs)
+            applySpeed(force = true)
+            player.playWhenReady = keepPlaying
+        } catch (_: Throwable) {
+            mixBank.clear()
+            stemsMode = false
+            player.stop()
+            player.clearMediaItems()
+        }
         captureClickClock()
     }
 
@@ -236,10 +237,6 @@ class PlaybackEngine(context: Context) {
             // Не stop/pause и не роняем Activity.
         }
         captureClickClock()
-    }
-
-    private fun setMedia(uri: Uri) {
-        player.setMediaItem(androidx.media3.common.MediaItem.fromUri(uri))
     }
 
     private fun ExoPlayer.disableOffload() {

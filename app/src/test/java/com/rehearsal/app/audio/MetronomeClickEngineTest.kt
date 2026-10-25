@@ -126,47 +126,51 @@ class MetronomeClickEngineTest {
     }
 
     @Test
-    fun mixesClicksFromBeatsWhilePlayingInChunks() {
+    fun analysisOffsetShiftsEqualGrid() {
         val engine = engine(enabled = true)
-        engine.originalBpm = 90f
-        val beatsUs = longArrayOf(0L, 400_000L, 900_000L, 1_550_000L)
-        engine.setBeatTimesUs(beatsUs)
-        assertTrue(engine.hasBeatTimes())
-
+        engine.originalBpm = 120f
+        engine.setGridOriginUs(230_000L)
         val sampleRate = 44100
         val frames = sampleRate * 2
-        val whole = clickLayer(engine, silencePcm16(frames), 0L)
-
-        val concat = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.nativeOrder())
-        var offset = 0
-        val chunkFrames = 512
-        while (offset < frames) {
-            val n = minOf(chunkFrames, frames - offset)
-            val pts = BeatClock.sampleToMediaUs(offset.toLong(), sampleRate)
-            val chunk = clickLayer(engine, silencePcm16(n), pts)
-            concat.put(chunk.asReadOnlyBuffer())
-            offset += n
-        }
-        concat.flip()
-        assertTrue(
-            "chunked beats[] mix must match a single buffer",
-            correlation(whole, concat) > 0.99,
-        )
-        val shorts = concat.duplicate().order(concat.order()).asShortBuffer()
-        val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(48)
-        beatsUs.forEach { beatUs ->
+        val out = clickLayer(engine, silencePcm16(frames), 0L)
+        val shorts = out.duplicate().order(out.order()).asShortBuffer()
+        val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(32)
+        val interval = BeatClock.intervalUs(120f)
+        val expected = listOf(230_000L, 230_000L + interval, 230_000L + 2 * interval)
+        expected.forEach { beatUs ->
             val start = BeatClock.mediaUsToSample(beatUs, sampleRate).toInt()
             val peak = peakInRange(shorts, start, start + clickFrames)
-            assertTrue("playing mix missed beats[] $beatUs (peak=$peak)", peak > 0.5)
+            assertTrue("offset grid missed $beatUs (peak=$peak)", peak > 0.5)
         }
-        val gapPeak = peakInRange(shorts, sampleRate / 8, sampleRate / 8 + 200)
-        assertTrue("energy between irregular beats, peak=$gapPeak", gapPeak < 0.05)
+        val tooEarly = peakInRange(shorts, 0, BeatClock.mediaUsToSample(200_000L, sampleRate).toInt())
+        assertTrue("no click before origin, peak=$tooEarly", tooEarly < 0.05)
+    }
+
+    @Test
+    fun denseAnalysisBeatsStillClickQuartersAtOriginalBpm() {
+        val engine = engine(enabled = true)
+        engine.originalBpm = 120f
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = doubleArrayOf(0.0, 0.25, 0.5, 0.75, 1.0),
+                downbeatOffset = 0.0,
+                duration = 2.0,
+            ),
+        )
+        val sampleRate = 44100
+        val out = clickLayer(engine, silencePcm16(sampleRate), 0L)
+        val shorts = out.duplicate().order(out.order()).asShortBuffer()
+        val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(32)
+        val at250 = BeatClock.mediaUsToSample(250_000L, sampleRate).toInt()
+        val at500 = BeatClock.mediaUsToSample(500_000L, sampleRate).toInt()
+        assertTrue("eighth-note analysis must not click at 250ms", peakInRange(shorts, at250, at250 + 32) < 0.05)
+        assertTrue("quarter at 500ms", peakInRange(shorts, at500, at500 + clickFrames) > 0.5)
     }
 
     @Test
     fun enableFromMiddleHitsNearestBeatNotOneSecondLater() {
         val engine = engine(enabled = true)
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L, 1_000_000L, 1_500_000L))
         val sampleRate = 44100
         val startUs = 1_200_000L
         val frames = 44100 / 2
@@ -184,39 +188,39 @@ class MetronomeClickEngineTest {
     }
 
     @Test
-    fun clickPunchesThroughFullMixAndDownbeatIsLouder() {
+    fun clickPunchesThroughAndEveryBeatMatches() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val sampleRate = 44100
-        val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(48)
+        val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(32)
         val layer = clickLayer(engine, silencePcm16(sampleRate), 0L)
-        val withBeats = layer
-        val downbeatPeak = peakInRange(
-            withBeats.duplicate().order(withBeats.order()).asShortBuffer(),
-            0,
-            clickFrames,
-        )
-        assertTrue("dedicated layer must punch at ~2.2, peak=$downbeatPeak", downbeatPeak > 0.95)
-        assertTrue("stems muted: click layer still has energy", peak(layer) > 0.5)
-
-        val downbeatAdded = peakInRange(
-            withBeats.duplicate().order(withBeats.order()).asShortBuffer(),
-            0,
-            clickFrames,
-        )
+        val shorts = layer.duplicate().order(layer.order()).asShortBuffer()
+        val first = peakInRange(shorts, 0, clickFrames)
         val offbeatStart = BeatClock.mediaUsToSample(500_000L, sampleRate).toInt()
-        val offbeatAdded = peakInRange(
-            withBeats.duplicate().order(withBeats.order()).asShortBuffer(),
-            offbeatStart,
-            offbeatStart + clickFrames,
-        )
-        assertTrue(
-            "downbeat must be louder than other beats ($downbeatAdded vs $offbeatAdded)",
-            downbeatAdded > offbeatAdded * 1.05,
-        )
-        assertEquals(2.2f, MetronomeClickEngine.DOWNBEAT_GAIN, 1e-4f)
-        assertTrue(MetronomeClickEngine.BEAT_GAIN < MetronomeClickEngine.DOWNBEAT_GAIN)
+        val second = peakInRange(shorts, offbeatStart, offbeatStart + clickFrames)
+        assertTrue("dedicated layer must be a clear click, peak=$first", first > 0.85)
+        assertEquals("no strong/weak beats", first, second, 0.02)
+        assertTrue("stems muted: click layer still has energy", peak(layer) > 0.5)
+        assertEquals(1f, MetronomeClickEngine.CLICK_GAIN, 1e-4f)
+    }
+
+    @Test
+    fun wallSpacingFollowsMetronomeBpm() {
+        val engine = engine(enabled = true)
+        engine.originalBpm = 120f
+        val speed = com.rehearsal.app.player.PlaybackMath.playbackSpeed(180f, 120f)
+        assertEquals(1.5f, speed, 1e-5f)
+        val sampleRate = 44100
+        val dest = silencePcm16(sampleRate)
+        ClickLayer.render(dest, engine, 0L, speed)
+        dest.position(0)
+        dest.limit(dest.capacity())
+        val shorts = dest.duplicate().order(dest.order()).asShortBuffer()
+        val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(32)
+        val wall333 = BeatClock.mediaUsToSample(333_333L, sampleRate).toInt()
+        val wall500 = BeatClock.mediaUsToSample(500_000L, sampleRate).toInt()
+        assertTrue("180 BPM wall: 500ms media at 333ms", peakInRange(shorts, wall333, wall333 + clickFrames) > 0.5)
+        assertTrue("must not still click at 500ms wall", peakInRange(shorts, wall500, wall500 + 32) < 0.05)
     }
 
     @Test

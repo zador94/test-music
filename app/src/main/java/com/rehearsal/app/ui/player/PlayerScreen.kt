@@ -114,11 +114,9 @@ fun PlayerScreen(
                 onSeek = vm::seek,
             )
 
-            if (track?.isReady == true) {
+            if (track?.hasFourStems() == true) {
                 StemMixer(
                     ui = ui,
-                    canFourStems = track?.hasFourStems() == true,
-                    onUseStems = vm::setUseStems,
                     onVolume = vm::setVolume,
                     onMute = vm::toggleMute,
                     onSolo = vm::toggleSolo,
@@ -153,7 +151,7 @@ private fun SplitBanner(track: TrackEntity, onRetry: () -> Unit) {
                 )
                 Text(
                     "HT-Demucs считает 4 дорожки. Первая песня ещё скачает модель (~166 МБ). " +
-                        "Дальше — минуты, телефон греется. Оригинал можно слушать сейчас.",
+                        "Дальше — минуты, телефон греется. Плеер откроется, когда стемы будут готовы.",
                     color = Daw.muted,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -303,7 +301,7 @@ private fun MetronomeBlock(
             Column(Modifier.weight(1f)) {
                 Text("Метроном", fontWeight = FontWeight.SemiBold, color = Daw.text)
                 Text(
-                    "Клики на часах плеера, не по таймеру",
+                    "Ровные четверти, один клик. На часах плеера, не по таймеру.",
                     color = Daw.muted,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -349,99 +347,28 @@ private fun MetronomeBlock(
 @Composable
 private fun StemMixer(
     ui: PlayerUi,
-    canFourStems: Boolean,
-    onUseStems: (Boolean) -> Unit,
     onVolume: (StemId, Float) -> Unit,
     onMute: (StemId) -> Unit,
     onSolo: (StemId) -> Unit,
 ) {
     DawCard {
         Text("Микшер", fontWeight = FontWeight.SemiBold, color = Daw.text, fontSize = 18.sp)
-        SourceToggle(
-            useStems = ui.useStems,
-            canFourStems = canFourStems,
-            onUseStems = onUseStems,
+        Text(
+            "Mute вокала = фейдер 0, голоса быть не должно. Гитара — в «Музыке».",
+            color = Daw.muted,
+            style = MaterialTheme.typography.bodySmall,
         )
-        if (ui.useStems && canFourStems) {
-            Text(
-                "Mute вокала = фейдер 0, голоса быть не должно. Гитара — в «Музыке».",
-                color = Daw.muted,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            StemId.entries.forEach { id ->
-                val fader = ui.faders.getValue(id)
-                StemFaderRow(
-                    title = id.labelRu,
-                    color = Daw.stem(id),
-                    fader = fader,
-                    onVolume = { onVolume(id, it) },
-                    onMute = { onMute(id) },
-                    onSolo = { onSolo(id) },
-                )
-            }
-        } else if (!canFourStems) {
-            Text(
-                "Стемы ещё не готовы — звучит оригинал.",
-                color = Daw.muted,
-                style = MaterialTheme.typography.bodySmall,
+        StemId.entries.forEach { id ->
+            val fader = ui.faders.getValue(id)
+            StemFaderRow(
+                title = id.labelRu,
+                color = Daw.stem(id),
+                fader = fader,
+                onVolume = { onVolume(id, it) },
+                onMute = { onMute(id) },
+                onSolo = { onSolo(id) },
             )
         }
-    }
-}
-
-@Composable
-private fun SourceToggle(
-    useStems: Boolean,
-    canFourStems: Boolean,
-    onUseStems: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(Daw.pillShape)
-            .background(Daw.bg)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        SourceTab(
-            title = "Оригинал",
-            selected = !useStems,
-            modifier = Modifier.weight(1f),
-            onClick = { onUseStems(false) },
-        )
-        SourceTab(
-            title = "4 стемы",
-            selected = useStems,
-            enabled = canFourStems,
-            modifier = Modifier.weight(1f),
-            onClick = { onUseStems(true) },
-        )
-    }
-}
-
-@Composable
-private fun SourceTab(
-    title: String,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    onClick: () -> Unit,
-) {
-    val bg = if (selected) Daw.accent else Color.Transparent
-    val fg = when {
-        !enabled -> Daw.muted.copy(alpha = 0.4f)
-        selected -> Color.White
-        else -> Daw.muted
-    }
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(bg)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(title, color = fg, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
     }
 }
 

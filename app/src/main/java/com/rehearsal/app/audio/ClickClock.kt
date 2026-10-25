@@ -6,6 +6,8 @@ package com.rehearsal.app.audio
  * Читать `player.currentPosition` с worker — IllegalStateException и краш процесса.
  */
 object ClickClock {
+    const val MAX_OUTPUT_LATENCY_MS = 400
+
     data class Origin(
         val mediaUs: Long = 0L,
         val wallNs: Long = 0L,
@@ -23,5 +25,23 @@ object ClickClock {
         val elapsedUs = elapsedNs / 1_000L
         val mediaUs = base + (elapsedUs * speed.toDouble()).toLong()
         return ClickTrack.Snapshot(mediaUs.coerceAtLeast(0L), speed, playing = true)
+    }
+
+    /**
+     * Курсор клика: то, что сейчас слышно ([heardMediaUs]), плюс задержка
+     * выходного AudioTrack. Иначе клик пишется «на сейчас», а колонки играют его
+     * на десятки–сотни мс позже доли.
+     */
+    fun outputLatencyMs(bufferSizeInFrames: Int, sampleRate: Int): Int {
+        val sr = sampleRate.coerceAtLeast(1)
+        val frames = bufferSizeInFrames.coerceAtLeast(0)
+        val ms = (frames * 1000L) / sr
+        return ms.toInt().coerceIn(0, MAX_OUTPUT_LATENCY_MS)
+    }
+
+    fun scheduledMediaUs(heardMediaUs: Long, speed: Float, outputLatencyMs: Int): Long {
+        val rate = if (speed.isFinite()) speed.coerceIn(0.5f, 2f) else 1f
+        val latencyUs = outputLatencyMs.coerceIn(0, MAX_OUTPUT_LATENCY_MS).toLong() * 1_000L
+        return heardMediaUs.coerceAtLeast(0L) + (latencyUs * rate.toDouble()).toLong()
     }
 }

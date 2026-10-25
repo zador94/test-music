@@ -13,8 +13,8 @@ android {
         applicationId = "com.rehearsal.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.3.10"
+        versionCode = 15
+        versionName = "0.3.12"
     }
 
     buildTypes {
@@ -48,12 +48,16 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+
+    lint {
+        disable += "UnsafeOptInUsageError"
+        disable += "UnsafeOptInUsageWarning"
+    }
 }
 
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        optIn.add("androidx.media3.common.util.UnstableApi")
     }
 }
 

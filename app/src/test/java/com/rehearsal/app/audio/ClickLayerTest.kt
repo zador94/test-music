@@ -15,7 +15,6 @@ class ClickLayerTest {
     @Test
     fun mutedStemsStillHaveClickEnergy() {
         val engine = engine()
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val silence = silence(44100)
         val layer = layer(engine, silence, 0L)
         assertTrue("click layer must not be all zeros when stems are muted", peak(layer) > 0.85)
@@ -26,14 +25,13 @@ class ClickLayerTest {
     fun disabledLayerIsSilence() {
         val engine = engine()
         engine.enabled = false
-        engine.setBeatTimesUs(longArrayOf(0L))
         assertTrue(isSilent(layer(engine, silence(2048), 0L)))
     }
 
     @Test
-    fun emptyBeatsFallsBackToGrid() {
+    fun emptyAnalysisClicksOnOriginalBpmGrid() {
         val engine = engine()
-        engine.setBeatTimesUs(longArrayOf())
+        engine.setAnalysis(null)
         val out = layer(engine, silence(44100), 0L)
         assertFalse("BeatClock grid must click without analysis", isSilent(out))
         val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt()
@@ -41,22 +39,21 @@ class ClickLayerTest {
     }
 
     @Test
-    fun downbeatIsLouderAndLongerThanOtherBeats() {
+    fun everyBeatUsesTheSameClick() {
         val engine = engine()
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val out = layer(engine, silence(44100), 0L)
-        val downMs = (0.028 * 44100).toInt()
-        val beatMs = (0.012 * 44100).toInt()
-        val downPeak = peakInRange(out, 0, downMs)
+        val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt()
+        val first = peakInRange(out, 0, clickFrames)
         val offStart = BeatClock.mediaUsToSample(500_000L, 44100).toInt()
-        val offPeak = peakInRange(out, offStart, offStart + beatMs)
-        assertTrue("downbeat ~2.2 must punch, peak=$downPeak", downPeak > 0.95)
-        assertTrue("other beat still audible, peak=$offPeak", offPeak > 0.5)
-        assertTrue(downPeak >= offPeak)
-        assertEquals(2.2f, MetronomeClickEngine.DOWNBEAT_GAIN, 1e-4f)
-        assertTrue(MetronomeClickEngine.BEAT_GAIN < MetronomeClickEngine.DOWNBEAT_GAIN)
-        assertTrue(MetronomeClickEngine.synthesizeDownbeat(44100).size >
-            MetronomeClickEngine.synthesizeBeat(44100).size)
+        val second = peakInRange(out, offStart, offStart + clickFrames)
+        assertTrue("first click peak=$first", first > 0.85)
+        assertTrue("second click peak=$second", second > 0.85)
+        assertEquals("uniform click, no downbeat accent", first, second, 0.02)
+        assertEquals(
+            MetronomeClickEngine.synthesizeClick(44100).size.toLong(),
+            (MetronomeClickEngine.CLICK_DURATION_SEC * 44100).toLong().coerceAtLeast(32),
+        )
+        assertEquals(1f, MetronomeClickEngine.CLICK_GAIN, 1e-4f)
     }
 
     @Test
@@ -71,7 +68,6 @@ class ClickLayerTest {
         )
         engine.originalBpm = 120f
         engine.enabled = true
-        engine.setBeatTimesUs(longArrayOf(0L))
         val out = layer(engine, silence(2048), 0L)
         assertFalse("click layer is its own 44.1 stereo track, not sink mime", isSilent(out))
         assertTrue(peak(out) > 0.85)
@@ -80,7 +76,6 @@ class ClickLayerTest {
     @Test
     fun timeUnsetPlayheadStillClicks() {
         val engine = engine()
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val out = layer(engine, silence(2048), C.TIME_UNSET)
         assertFalse(isSilent(out))
         assertTrue(peak(out) > 0.85)
@@ -103,7 +98,6 @@ class ClickLayerTest {
     @Test
     fun speedUpCompressesBeatSpacingInWallBuffer() {
         val engine = engine()
-        engine.setBeatTimesUs(longArrayOf(0L, 500_000L))
         val one = layer(engine, silence(44100), 0L, speed = 1f)
         val fast = layer(engine, silence(44100), 0L, speed = 2f)
         val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt()

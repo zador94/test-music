@@ -36,7 +36,6 @@ data class PlayerUi(
     val metronomeBpm: Float = 120f,
     val metronomeOn: Boolean = false,
     val speed: Float = 1f,
-    val useStems: Boolean = false,
     val faders: Map<StemId, StemFader> = StemId.entries.associateWith { StemFader() },
 )
 
@@ -56,7 +55,6 @@ class PlayerViewModel(
 
     private var loadKey: String? = null
     private var bpmInitialized = false
-    private var userPickedSource = false
     private var userOverrodeOriginalBpm = false
 
     init {
@@ -95,9 +93,6 @@ class PlayerViewModel(
                             )
                         }
                     }
-                }
-                if (!userPickedSource && item.hasFourStems()) {
-                    _ui.update { it.copy(useStems = true) }
                 }
                 maybeLoad(item)
             }
@@ -157,14 +152,6 @@ class PlayerViewModel(
         _ui.update { it.copy(metronomeOn = on) }
     }
 
-    fun setUseStems(use: Boolean) {
-        userPickedSource = true
-        _ui.update { it.copy(useStems = use) }
-        loadKey = null
-        track.value?.let(::maybeLoad)
-        applyMixer()
-    }
-
     fun setVolume(id: StemId, volume: Float) {
         val v = volume.coerceIn(0f, 1f)
         _ui.update { ui ->
@@ -219,7 +206,6 @@ class PlayerViewModel(
     }
 
     private fun maybeLoad(item: TrackEntity) {
-        val preferStems = _ui.value.useStems
         val key = listOf(
             item.id,
             item.originalPath,
@@ -227,11 +213,10 @@ class PlayerViewModel(
             item.drumsPath.orEmpty(),
             item.bassPath.orEmpty(),
             item.otherPath.orEmpty(),
-            preferStems.toString(),
         ).joinToString("|")
         if (key == loadKey) return
         loadKey = key
-        playback.load(item, preferStems)
+        playback.load(item)
         applyMixer()
     }
 

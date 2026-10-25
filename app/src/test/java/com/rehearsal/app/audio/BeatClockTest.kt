@@ -36,6 +36,19 @@ class BeatClockTest {
     }
 
     @Test
+    fun gridHonorsDownbeatOrigin() {
+        val interval = BeatClock.intervalUs(120f)
+        val origin = 230_000L
+        assertEquals(origin, BeatClock.beatAtOrAfter(0L, interval, origin))
+        assertEquals(origin, BeatClock.beatAtOrAfter(origin, interval, origin))
+        assertEquals(origin + interval, BeatClock.beatAtOrAfter(origin + 1L, interval, origin))
+        assertEquals(
+            origin,
+            BeatClock.firstOverlappingBeatUs(0L, interval, 6_000L, origin),
+        )
+    }
+
+    @Test
     fun firstIndexAtOrAfterIsBinarySearchOnBeats() {
         val beats = longArrayOf(0L, 400_000L, 900_000L, 1_500_000L)
         assertEquals(0, BeatClock.firstIndexAtOrAfter(beats, 0L))

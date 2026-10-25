@@ -13,12 +13,14 @@ object BeatClock {
         return (60_000_000.0 / originalBpm.toDouble()).roundToLong().coerceAtLeast(1L)
     }
 
-    /** Доля 0 в t=0. Первая доля с временем ≥ [mediaTimeUs]. */
-    fun beatAtOrAfter(mediaTimeUs: Long, intervalUs: Long): Long {
-        if (intervalUs <= 0L) return 0L
-        if (mediaTimeUs <= 0L) return 0L
-        val n = (mediaTimeUs + intervalUs - 1L) / intervalUs
-        return n * intervalUs
+    /** Первая доля с временем ≥ [mediaTimeUs]. Сетка от [originUs], шаг [intervalUs]. */
+    fun beatAtOrAfter(mediaTimeUs: Long, intervalUs: Long, originUs: Long = 0L): Long {
+        val origin = originUs.coerceAtLeast(0L)
+        if (intervalUs <= 0L) return origin
+        if (mediaTimeUs <= origin) return origin
+        val delta = mediaTimeUs - origin
+        val n = (delta + intervalUs - 1L) / intervalUs
+        return origin + n * intervalUs
     }
 
     /**
@@ -29,10 +31,11 @@ object BeatClock {
         mediaStartUs: Long,
         intervalUs: Long,
         clickDurationUs: Long,
+        originUs: Long = 0L,
     ): Long {
         val duration = clickDurationUs.coerceAtLeast(1L)
         val earliest = mediaStartUs - duration + 1L
-        return beatAtOrAfter(earliest, intervalUs)
+        return beatAtOrAfter(earliest, intervalUs, originUs)
     }
 
     fun mediaUsToSample(timeUs: Long, sampleRate: Int): Long {
