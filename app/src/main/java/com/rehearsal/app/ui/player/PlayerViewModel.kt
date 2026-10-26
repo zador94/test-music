@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.rehearsal.app.RehearsalApplication
+import com.rehearsal.app.audio.ClickCalibration
 import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
@@ -31,11 +32,13 @@ data class PlayerUi(
     val playing: Boolean = false,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
-    val originalBpmText: String = "120",
+    val originalBpmText: String = "120.0",
     val originalBpm: Float = MetronomeClickEngine.DEFAULT_BPM,
     val metronomeBpm: Float = 120f,
     val metronomeOn: Boolean = false,
     val speed: Float = 1f,
+    val clickShiftMs: Int = ClickCalibration.DEFAULT_MS,
+    val kickGridBusy: Boolean = false,
     val faders: Map<StemId, StemFader> = StemId.entries.associateWith { StemFader() },
 )
 
@@ -50,7 +53,7 @@ class PlayerViewModel(
     val track: StateFlow<TrackEntity?> = app.repository.observe(trackId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    private val _ui = MutableStateFlow(PlayerUi())
+    private val _ui = MutableStateFlow(PlayerUi(clickShiftMs = playback.clickShiftMs))
     val ui: StateFlow<PlayerUi> = _ui.asStateFlow()
 
     private var loadKey: String? = null
@@ -72,11 +75,12 @@ class PlayerViewModel(
                     playback.setMetronomeEnabled(false)
                     _ui.update {
                         it.copy(
-                            originalBpmText = bpm.toInt().toString(),
+                            originalBpmText = PlaybackMath.formatOriginalBpm(playback.originalBpm),
                             originalBpm = playback.originalBpm,
                             metronomeBpm = playback.metronomeBpm,
                             metronomeOn = false,
                             speed = playback.playbackSpeed(),
+                            clickShiftMs = playback.clickShiftMs,
                         )
                     }
                     bpmInitialized = true
@@ -88,10 +92,11 @@ class PlayerViewModel(
                         if (followMetronome) playback.setMetronomeBpm(bpm)
                         _ui.update {
                             it.copy(
-                                originalBpmText = bpm.toInt().toString(),
+                                originalBpmText = PlaybackMath.formatOriginalBpm(playback.originalBpm),
                                 originalBpm = playback.originalBpm,
                                 metronomeBpm = playback.metronomeBpm,
                                 speed = playback.playbackSpeed(),
+                                clickShiftMs = playback.clickShiftMs,
                             )
                         }
                     }
@@ -111,6 +116,11 @@ class PlayerViewModel(
                     )
                 }
                 delay(100)
+            }
+        }
+        viewModelScope.launch {
+            app.repository.kickGridBusy.collect { ids ->
+                _ui.update { it.copy(kickGridBusy = trackId in ids) }
             }
         }
     }
@@ -151,6 +161,11 @@ class PlayerViewModel(
     fun setMetronomeOn(on: Boolean) {
         playback.setMetronomeEnabled(on)
         _ui.update { it.copy(metronomeOn = on) }
+    }
+
+    fun setClickShiftMs(ms: Int) {
+        playback.setClickShiftMs(ms)
+        _ui.update { it.copy(clickShiftMs = playback.clickShiftMs) }
     }
 
     fun setVolume(id: StemId, volume: Float) {
@@ -201,6 +216,10 @@ class PlayerViewModel(
         viewModelScope.launch { app.repository.retrySplit(trackId) }
     }
 
+    fun recalculateKickGrid() {
+        viewModelScope.launch { refreshKickGrid(force = true) }
+    }
+
     override fun onCleared() {
         playback.pause()
         super.onCleared()
@@ -219,6 +238,26 @@ class PlayerViewModel(
         loadKey = key
         playback.load(item)
         applyMixer()
+        viewModelScope.launch { refreshKickGrid(force = false) }
+    }
+
+    private suspend fun refreshKickGrid(force: Boolean) {
+        val analysis = app.repository.refreshKickGrid(trackId, force) ?: return
+        playback.applyKickGrid(analysis)
+        if (userOverrodeOriginalBpm) return
+        val bpm = analysis.bpm
+        val current = _ui.value.originalBpm
+        val followMetronome = abs(_ui.value.metronomeBpm - current) < 0.51f
+        playback.setOriginalBpm(bpm)
+        if (followMetronome) playback.setMetronomeBpm(bpm)
+        _ui.update {
+            it.copy(
+                originalBpmText = PlaybackMath.formatOriginalBpm(playback.originalBpm),
+                originalBpm = playback.originalBpm,
+                metronomeBpm = playback.metronomeBpm,
+                speed = playback.playbackSpeed(),
+            )
+        }
     }
 
     private fun applyMixer() {

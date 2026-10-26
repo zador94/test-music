@@ -6,13 +6,11 @@ import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences
 import androidx.media3.exoplayer.ExoPlayer
-import com.rehearsal.app.audio.ClickClock
-import com.rehearsal.app.audio.ClickTrack
+import com.rehearsal.app.audio.ClickCalibration
 import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.audio.RehearsalRenderersFactory
 import com.rehearsal.app.audio.StemMixBank
 import com.rehearsal.app.audio.StemMixMediaSource
-import com.rehearsal.app.audio.TempoMath
 import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
@@ -21,8 +19,8 @@ import java.io.File
 /**
  * Один ExoPlayer, только стемы: [StemMixMediaSource] (PCM 16-bit из bank).
  * Импортированный mix не ставится, даже если четырёх WAV нет.
- * Клики метронома — отдельный [ClickTrack], ровные четверти, один клик.
- * speed = metronomeBpm / originalBpm.
+ * Клик метронома в том же PCM, что музыка (после WSOLA). AudioTrack 1×.
+ * speed = metronomeBpm / originalBpm — MediaClock; stretch делает sink.
  */
 class PlaybackEngine(context: Context) {
     val clicks = MetronomeClickEngine()
@@ -43,9 +41,6 @@ class PlaybackEngine(context: Context) {
             disableOffload()
         }
 
-    private val clickTrack = ClickTrack(clicks, ::clickClock) { player.audioSessionId }
-    @Volatile private var clickOrigin = ClickClock.Origin()
-
     private var stemsMode: Boolean = false
     private var loadedTrackId: String? = null
     private var appliedSpeed: Float = 1f
@@ -57,19 +52,22 @@ class PlaybackEngine(context: Context) {
         private set
     var measuredOriginalBpm: Float? = null
         private set
+    var clickShiftMs: Int = ClickCalibration.DEFAULT_MS
+        private set
+
+    private val clickPrefs = appContext.getSharedPreferences(
+        ClickCalibration.PREFS_NAME,
+        Context.MODE_PRIVATE,
+    )
 
     init {
+        clickShiftMs = ClickCalibration.load(clickPrefs)
+        clicks.calibrationUs = ClickCalibration.toUs(clickShiftMs)
         player.addListener(object : Player.Listener {
-            override fun onEvents(player: Player, events: Player.Events) {
-                captureClickClock()
-            }
-
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) {
                     player.pause()
                     player.seekTo(0)
-                    clickTrack.onSeek()
-                    captureClickClock()
                 }
             }
         })
@@ -87,12 +85,10 @@ class PlaybackEngine(context: Context) {
         appliedSpeed = Float.NaN
         speedGate.reset()
         clicks.onFlush()
-        clickTrack.onSeek()
         mixBank.clear()
         loadAnalysis(track)
 
         if (!PlaybackPolicy.canStartPlayback(track)) {
-            captureClickClock()
             return
         }
 
@@ -116,18 +112,14 @@ class PlaybackEngine(context: Context) {
             player.stop()
             player.clearMediaItems()
         }
-        captureClickClock()
     }
 
     fun play() {
         player.play()
-        captureClickClock()
-        if (clicks.enabled) clickTrack.start()
     }
 
     fun pause() {
         player.pause()
-        captureClickClock()
     }
 
     fun togglePlay() {
@@ -136,8 +128,6 @@ class PlaybackEngine(context: Context) {
 
     fun seekTo(positionMs: Long) {
         player.seekTo(positionMs)
-        clickTrack.onSeek()
-        captureClickClock()
     }
 
     fun setOriginalBpm(bpm: Float) {
@@ -153,24 +143,25 @@ class PlaybackEngine(context: Context) {
     }
 
     fun setMetronomeEnabled(enabled: Boolean) {
-        // Флаг + отдельный ClickTrack. ExoPlayer не stop/prepare.
+        // Только флаг. ExoPlayer не stop/prepare; клик в том же PCM.
         clicks.enabled = enabled
-        if (enabled) {
-            captureClickClock()
-            clickTrack.start()
-        } else {
-            clickTrack.stop()
-        }
+    }
+
+    fun setClickShiftMs(ms: Int) {
+        clickShiftMs = ClickCalibration.clampMs(ms)
+        ClickCalibration.save(clickPrefs, clickShiftMs)
+        clicks.calibrationUs = ClickCalibration.toUs(clickShiftMs)
     }
 
     fun loadAnalysis(track: TrackEntity) {
         val dir = File(track.originalPath).parentFile
         val file = dir?.let { File(it, TrackAnalysis.FILE_NAME) }
-        val analysis = if (file != null) TrackAnalysis.fromFile(file) else null
+        applyKickGrid(if (file != null) TrackAnalysis.fromFile(file) else null)
+    }
+
+    fun applyKickGrid(analysis: TrackAnalysis?) {
         clicks.setAnalysis(analysis)
-        measuredOriginalBpm = analysis?.let { data ->
-            TempoMath.bpmFromBeats(data.beats, data.bpm.toDouble())?.toFloat()
-        }
+        measuredOriginalBpm = analysis?.bpm?.let { PlaybackMath.committedOriginalBpm(it) }
     }
 
     fun setStemGain(id: StemId, gain: Float) {
@@ -197,37 +188,11 @@ class PlaybackEngine(context: Context) {
     fun applyPendingSpeed() {
         val speed = speedGate.poll()
         if (speed != null) pushSpeed(speed)
-        captureClickClock()
     }
 
     fun release() {
-        clickTrack.release()
         mixBank.clear()
         player.release()
-    }
-
-    /**
-     * Только volatile [clickOrigin] + nanoTime. Не трогать ExoPlayer:
-     * этот лямбда зовётся с потока `metronome-click`.
-     */
-    private fun clickClock(): ClickTrack.Snapshot =
-        ClickClock.snapshot(clickOrigin, System.nanoTime())
-
-    /** Только с потока ExoPlayer (main). */
-    private fun captureClickClock() {
-        try {
-            val playing = player.playWhenReady &&
-                player.playbackState != Player.STATE_IDLE &&
-                player.playbackState != Player.STATE_ENDED
-            clickOrigin = ClickClock.Origin(
-                mediaUs = player.currentPosition.coerceAtLeast(0L) * 1000L,
-                wallNs = System.nanoTime(),
-                speed = playbackSpeed(),
-                playing = playing,
-            )
-        } catch (_: Throwable) {
-            clickOrigin = clickOrigin.copy(playing = false, wallNs = System.nanoTime())
-        }
     }
 
     private fun applySpeed(force: Boolean = false) {
@@ -242,7 +207,6 @@ class PlaybackEngine(context: Context) {
         } catch (_: Throwable) {
             // Не stop/pause и не роняем Activity.
         }
-        captureClickClock()
     }
 
     private fun ExoPlayer.disableOffload() {

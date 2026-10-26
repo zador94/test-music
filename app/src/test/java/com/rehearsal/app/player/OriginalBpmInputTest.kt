@@ -31,7 +31,7 @@ class OriginalBpmInputTest {
         val draft = PlaybackMath.sanitizeBpmDraft("1")
         val commit = PlaybackMath.commitOriginalBpm(draft, 120f)
         assertNull("first char in Темп must not call setPlaybackSpeed", commit.applyBpm)
-        assertEquals("120", commit.displayText)
+        assertEquals("120.0", commit.displayText)
         assertEquals(1f, PlaybackMath.playbackSpeed(120f, 120f), 1e-5f)
         listOf("", "1", "10", "12", ".").forEach { key ->
             assertNull(PlaybackMath.commitOriginalBpm(key, 120f).applyBpm)
@@ -58,6 +58,17 @@ class OriginalBpmInputTest {
         PlaybackMath.clampMetronomeBpm(120f, 12f)
         PlaybackMath.clampMetronomeBpm(120f, 1f)
         PlaybackMath.clampMetronomeBpm(Float.NaN, Float.POSITIVE_INFINITY)
+    }
+
+    @Test
+    fun decimalOriginalBpmParsesAndCommitsOneTenth() {
+        assertEquals(104.6f, PlaybackMath.parseOriginalBpm("104.6"))
+        val commit = PlaybackMath.commitOriginalBpm("104.6", 120f)
+        assertEquals(104.6f, commit.applyBpm)
+        assertEquals("104.6", commit.displayText)
+        assertEquals(1f, PlaybackMath.playbackSpeed(104.6f, commit.applyBpm!!), 1e-5f)
+        assertEquals(104f, PlaybackMath.parseOriginalBpm("104."))
+        assertEquals(104f, PlaybackMath.parseOriginalBpm("104"))
     }
 
     @Test

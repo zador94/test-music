@@ -3,22 +3,72 @@ package com.rehearsal.app.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.rehearsal.app.audio.KickGrid
+import com.rehearsal.app.audio.TrackAnalysis
+import com.rehearsal.app.audio.WavReader
 import com.rehearsal.app.work.StemSplitWorker
+import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
 class TrackRepository(
     private val context: Context,
     private val dao: TrackDao,
     private val files: TrackFileStore,
 ) {
+    private val kickGridLocks = mutableMapOf<String, Mutex>()
+    private val _kickGridBusy = MutableStateFlow<Set<String>>(emptySet())
+    val kickGridBusy: StateFlow<Set<String>> = _kickGridBusy.asStateFlow()
+
     fun observeAll(): Flow<List<TrackEntity>> = dao.observeAll()
 
     fun observe(id: String): Flow<TrackEntity?> = dao.observeById(id)
 
     suspend fun get(id: String): TrackEntity? = dao.getById(id)
+
+    /**
+     * Пересчёт BPM/фазы по существующему drums WAV. Без Demucs.
+     * [force] — кнопка «Пересчитать темп и фазу»; иначе только если `kickGridVersion` устарел.
+     */
+    suspend fun refreshKickGrid(id: String, force: Boolean = false): TrackAnalysis? {
+        val mutex = synchronized(kickGridLocks) { kickGridLocks.getOrPut(id) { Mutex() } }
+        return mutex.withLock {
+            withContext(Dispatchers.IO) {
+                val track = dao.getById(id) ?: return@withContext null
+                val drumsFile = drumsWav(track) ?: return@withContext null
+                val existing = TrackAnalysis.fromFile(files.analysisJson(id))
+                if (!force && !KickGrid.needsRefresh(existing)) return@withContext existing
+                _kickGridBusy.update { it + id }
+                try {
+                    val drums = WavReader.readStereo(drumsFile)
+                    val seed = existing ?: TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate)
+                    val refined = KickGrid.refine(seed, drums)
+                    files.writeAnalysis(id, refined)
+                    dao.updateBpm(id, refined.bpm, System.currentTimeMillis())
+                    dao.getById(id)?.let { files.writeMeta(it) }
+                    refined
+                } catch (_: Throwable) {
+                    existing
+                } finally {
+                    _kickGridBusy.update { it - id }
+                }
+            }
+        }
+    }
+
+    private fun drumsWav(track: TrackEntity): File? {
+        val path = track.drumsPath ?: return null
+        val file = File(path)
+        return if (file.isFile) file else null
+    }
 
     suspend fun importFromUri(uri: Uri): String = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString().replace("-", "").take(12)

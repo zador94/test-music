@@ -7,16 +7,15 @@ import androidx.media3.common.Format
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.audio.AudioSink
 import com.rehearsal.app.player.PlaybackBuffers
+import com.rehearsal.app.player.PlaybackMath
 import com.rehearsal.app.player.SpeedStretch
 import java.nio.ByteBuffer
 
 /**
- * Stem PCM + mute-at-sink + software speed-up. Клики метронома — [ClickTrack],
- * не этот sink (веб: отдельный audio node, не тихий mix в song buffer).
- * На вкладке стемов [StemMixBank] сводится **здесь** (текущие mute/gain),
- * поверх копии уже смешанного PCM, только если layout/PTS совпадают.
- * Иначе 0.3.6 затирал выход нулями, а AudioTrack с буфером 80 мс не стартовал.
- * Toggle метронома не stop/prepare ExoPlayer.
+ * Stem PCM + mute-at-sink + WSOLA на любой скорости + клик в том же PCM.
+ * AudioTrack всегда 1× (не Sonic, не HAL playback params).
+ * ExoPlayer MediaClock: [getPlaybackParameters] отдаёт запрошенную скорость,
+ * sink играет растянутые сэмплы на 1× (1 с песни → 1/speed стены).
  */
 class MetronomeAudioSink(
     private val delegate: AudioSink,
@@ -25,6 +24,7 @@ class MetronomeAudioSink(
 ) : AudioSink by delegate {
 
     private val pipe = MetronomePcmPipe(clickEngine, mixBank)
+    @Volatile private var reportedSpeed: Float = 1f
 
     override fun configure(
         inputFormat: Format,
@@ -55,21 +55,21 @@ class MetronomeAudioSink(
 
     override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
         val requested = playbackParameters.speed
-        pipe.softwareSpeed = SpeedStretch.softwareSpeed(requested)
-        val trackSpeed = SpeedStretch.audioTrackSpeed(requested)
+        val clamped = if (requested.isFinite()) {
+            requested.coerceIn(PlaybackMath.MIN_SPEED, PlaybackMath.MAX_SPEED)
+        } else {
+            1f
+        }
+        reportedSpeed = clamped
+        pipe.softwareSpeed = SpeedStretch.softwareSpeed(clamped)
         delegate.setPlaybackParameters(
-            PlaybackParameters(trackSpeed, playbackParameters.pitch),
+            PlaybackParameters(SpeedStretch.audioTrackSpeed(clamped), playbackParameters.pitch),
         )
     }
 
     override fun getPlaybackParameters(): PlaybackParameters {
-        val delegateParams = delegate.playbackParameters
-        val software = pipe.softwareSpeed
-        return if (software > SpeedStretch.APPLY_ABOVE) {
-            PlaybackParameters(software, delegateParams.pitch)
-        } else {
-            delegateParams
-        }
+        val pitch = delegate.playbackParameters.pitch
+        return PlaybackParameters(reportedSpeed, pitch)
     }
 
     override fun setSkipSilenceEnabled(skipSilenceEnabled: Boolean) {
@@ -88,6 +88,7 @@ class MetronomeAudioSink(
 
     override fun reset() {
         pipe.reset()
+        reportedSpeed = 1f
         delegate.reset()
     }
 

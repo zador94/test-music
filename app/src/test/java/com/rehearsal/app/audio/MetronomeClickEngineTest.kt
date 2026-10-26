@@ -15,6 +15,24 @@ import kotlin.math.sqrt
 
 class MetronomeClickEngineTest {
     @Test
+    fun kickPhaseUsIsReadableForClickPipeLog() {
+        val engine = engine(enabled = true)
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 104.6f,
+                beats = DoubleArray(0),
+                downbeatOffset = 0.08,
+                duration = 8.0,
+                sampleRate = 44100,
+                kickPhaseSec = 0.08,
+            ),
+        )
+        // compileDebugKotlin / assembleDebug: MetronomePcmPipe.logStart reads this.
+        assertEquals(80_000L, engine.kickPhaseUs)
+        assertTrue("ClickPipe log needs a public getter", engine.kickPhaseUs > 0L)
+    }
+
+    @Test
     fun disabledMixLeavesPcmUnchanged() {
         val engine = engine(enabled = false)
         val src = sinePcm16()
@@ -31,7 +49,7 @@ class MetronomeClickEngineTest {
         val original = snapshot(src)
         val song = ClickMix.copyAndMix(src, ByteBuffer.allocateDirect(0), engine, 0L)
         assertTrue(
-            "song PCM must stay untouched; clicks live on ClickLayer",
+            "copyAndMix is music only; clicks land after stretch in the pipe",
             buffersEqual(original, song),
         )
         val clicks = clickLayer(engine, silencePcm16(44100), 0L)
@@ -163,9 +181,12 @@ class MetronomeClickEngineTest {
         val shorts = out.duplicate().order(out.order()).asShortBuffer()
         val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(32)
         val at250 = BeatClock.mediaUsToSample(250_000L, sampleRate).toInt()
-        val at500 = BeatClock.mediaUsToSample(500_000L, sampleRate).toInt()
+        val atZero = 0
         assertTrue("eighth-note analysis must not click at 250ms", peakInRange(shorts, at250, at250 + 32) < 0.05)
-        assertTrue("quarter at 500ms", peakInRange(shorts, at500, at500 + clickFrames) > 0.5)
+        assertTrue(
+            "beats[] must not move phase; kickPhase default 0 clicks at t=0",
+            peakInRange(shorts, atZero, atZero + clickFrames) > 0.5,
+        )
     }
 
     @Test
@@ -202,6 +223,7 @@ class MetronomeClickEngineTest {
         assertEquals("no strong/weak beats", first, second, 0.02)
         assertTrue("stems muted: click layer still has energy", peak(layer) > 0.5)
         assertEquals(1f, MetronomeClickEngine.CLICK_GAIN, 1e-4f)
+        assertEquals(2.2f, MetronomeClickEngine.CLICK_VOLUME, 1e-4f)
     }
 
     @Test
@@ -224,7 +246,7 @@ class MetronomeClickEngineTest {
     }
 
     @Test
-    fun nonPcmConfigureDoesNotTreatBufferAsPcm() {
+    fun aacMimeConfigureIsStillPcmAtSink() {
         val engine = MetronomeClickEngine()
         engine.configure(
             Format.Builder()
@@ -234,14 +256,14 @@ class MetronomeClickEngineTest {
                 .build(),
         )
         engine.enabled = true
-        assertFalse(engine.isPcm())
+        assertTrue("decoded sink input is PCM even if mime was AAC (0.3.8 silence)", engine.isPcm())
         val src = sinePcm16()
         val before = snapshot(src)
         val out = ClickMix.copyAndMix(src, ByteBuffer.allocateDirect(0), engine, 0L)
-        assertTrue(
-            "non-PCM must copy, not mix encoded bytes as samples",
-            buffersEqual(before, out),
-        )
+        assertTrue("copyAndMix still copies music; clicks mix after stretch", buffersEqual(before, out))
+        val clicks = clickLayer(engine, silencePcm16(2048), 0L)
+        assertFalse(isJackhammer(clicks))
+        assertTrue(peak(clicks) > 0.5)
     }
 
     private fun engine(enabled: Boolean): MetronomeClickEngine {

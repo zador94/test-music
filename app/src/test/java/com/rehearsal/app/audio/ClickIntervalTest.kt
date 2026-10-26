@@ -26,32 +26,39 @@ class ClickIntervalTest {
     }
 
     @Test
-    fun displayedIntegerNotUnroundedOlsFloat() {
-        val ols = 102.8f
-        val displayed = ols.toInt()
-        assertEquals("UI shows toInt()", 102, displayed)
+    fun displayedTenthNotInteger105() {
+        val ols = 104.63f
         val grid = PlaybackMath.committedOriginalBpm(ols)
-        assertEquals(
-            "grid BPM must be the integer on screen, not OLS 102.8",
-            displayed.toFloat(),
-            grid,
-            0f,
-        )
+        assertEquals("UI shows one decimal", 104.6f, grid, 0.01f)
         val engine = engine(grid)
         val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 8)
-        assertInterval(displayed, intervals)
-        val olsInterval = BeatClock.intervalUs(ols)
-        val shownInterval = BeatClock.intervalUs(displayed.toFloat())
+        assertInterval(104.6f, intervals)
+        val integerInterval = BeatClock.intervalUs(105f)
+        val shownInterval = BeatClock.intervalUs(grid)
         assertTrue(
-            "OLS 102.8 would rush vs displayed 102 (${olsInterval}us < ${shownInterval}us)",
-            olsInterval < shownInterval,
+            "integer 105 would rush vs 104.6 (${integerInterval}us < ${shownInterval}us)",
+            integerInterval < shownInterval,
         )
         intervals.forEach { actual ->
             assertTrue(
-                "click $actual us is OLS-fast, not 60/$displayed",
-                abs(actual - olsInterval) > abs(actual - shownInterval),
+                "click $actual us must follow 104.6, not integer 105",
+                abs(actual - integerInterval) > abs(actual - shownInterval),
             )
         }
+    }
+
+    @Test
+    fun integerOnlyGridDriftsVersusFractional() {
+        val trueBpm = 104.6f
+        val trueInterval = BeatClock.intervalUs(trueBpm)
+        val intInterval = BeatClock.intervalUs(105f)
+        val beats = 40L
+        val drift = abs(beats * trueInterval - beats * intInterval)
+        val hopUs = (TempoDetector.HOP * 1_000_000L) / 44100L
+        assertTrue("105 integer grid drifts vs 104.6 after 40 beats, drift=$drift", drift > hopUs)
+        val engine = engine(trueBpm)
+        val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 10)
+        assertInterval(trueBpm, intervals)
     }
 
     @Test
@@ -93,7 +100,7 @@ class ClickIntervalTest {
         }
         val ols = TempoMath.bpmFromBeats(beats, hintBpm = 100.0)!!
         val grid = PlaybackMath.committedOriginalBpm(ols.toFloat())
-        assertEquals(displayed.toFloat(), grid, 0f)
+        assertEquals(102.0, grid.toDouble(), 0.15)
         val engine = engine(grid)
         engine.setAnalysis(
             TrackAnalysis(
@@ -104,12 +111,15 @@ class ClickIntervalTest {
             ),
         )
         val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 6)
-        assertInterval(displayed, intervals)
+        assertInterval(grid, intervals)
     }
 
-    private fun assertInterval(displayedBpm: Int, intervalsUs: List<Long>) {
+    private fun assertInterval(displayedBpm: Int, intervalsUs: List<Long>) =
+        assertInterval(displayedBpm.toFloat(), intervalsUs)
+
+    private fun assertInterval(displayedBpm: Float, intervalsUs: List<Long>) {
         assertTrue("need several clicks, was ${intervalsUs.size}", intervalsUs.size >= 6)
-        val expected = BeatClock.intervalUs(displayedBpm.toFloat())
+        val expected = BeatClock.intervalUs(displayedBpm)
         intervalsUs.forEachIndexed { i, actual ->
             assertEquals(
                 "click interval[$i]=$actual us, expected 60/$displayedBpm = $expected us",
@@ -158,48 +168,41 @@ class ClickIntervalTest {
     }
 
     /**
-     * Same loop as [ClickTrack]: each wall chunk is playhead + queued latency.
+     * Chunks through the mix pipe at absolute song PTS (no second-track queue).
+     * [headStuck] is ignored: there is no AudioTrack playback head on the click path.
      */
     private fun followPlayheadIntervalsUs(
         engine: MetronomeClickEngine,
         displayedBpm: Int,
         seconds: Int,
-        headStuck: Boolean,
+        @Suppress("UNUSED_PARAMETER") headStuck: Boolean,
     ): List<Long> {
-        val chunkFrames = ClickLayer.chunkFrames()
+        val chunkFrames = 1024
         val totalFrames = ClickLayer.SAMPLE_RATE * seconds
         val concat = ByteBuffer.allocateDirect(totalFrames * ClickLayer.BYTES_PER_FRAME)
             .order(ByteOrder.nativeOrder())
-        var framesWritten = 0L
-        var cursorUs = Long.MIN_VALUE
-        var lastClickUs = Long.MIN_VALUE
-        var wallUs = 0L
-        val origin = ClickClock.Origin(mediaUs = 0L, wallNs = 0L, speed = 1f, playing = true)
-        val bufferLatencyMs = ClickClock.outputLatencyMs(chunkFrames * 2, ClickLayer.SAMPLE_RATE)
-        while (concat.remaining() >= ClickLayer.chunkBytes()) {
-            val snap = ClickClock.snapshot(origin, nowNs = wallUs * 1_000L)
-            val head = if (headStuck) 0 else framesWritten.toInt()
-            val queuedMs = ClickClock.queuedLatencyMs(framesWritten, head, ClickLayer.SAMPLE_RATE)
-            val targetUs = ClickClock.scheduledMediaUs(
-                snap.positionUs,
-                snap.speed,
-                ClickClock.writeLatencyMs(queuedMs, bufferLatencyMs),
-            )
-            cursorUs = ClickClock.nextWriteMediaUs(
-                cursorUs,
-                targetUs,
-                ClickLayer.mediaAdvanceUs(snap.speed),
-            )
-            val mediaStartUs = cursorUs
-            val chunk = ClickLayer.allocateChunk()
-            chunk.clear()
-            chunk.limit(ClickLayer.chunkBytes())
-            lastClickUs = ClickLayer.render(chunk, engine, mediaStartUs, snap.speed, lastClickUs)
-            chunk.position(0)
-            chunk.limit(ClickLayer.chunkBytes())
-            concat.put(chunk)
-            framesWritten += chunkFrames
-            wallUs += BeatClock.sampleToMediaUs(chunkFrames.toLong(), ClickLayer.SAMPLE_RATE)
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(
+            Format.Builder()
+                .setSampleMimeType(MimeTypes.AUDIO_RAW)
+                .setPcmEncoding(C.ENCODING_PCM_16BIT)
+                .setSampleRate(ClickLayer.SAMPLE_RATE)
+                .setChannelCount(2)
+                .build(),
+        )
+        var offset = 0
+        while (offset < totalFrames) {
+            val n = minOf(chunkFrames, totalFrames - offset)
+            val pts = BeatClock.sampleToMediaUs(offset.toLong(), ClickLayer.SAMPLE_RATE)
+            val chunk = silence(n)
+            val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+            var guard = 0
+            while (guard < 10_000) {
+                if (pipe.handleBuffer(chunk, pts, 1, sink::handleBuffer)) break
+                guard++
+            }
+            concat.put(sink.lastSubmittedAsBuffer())
+            offset += n
         }
         concat.flip()
         val intervals = onsetIntervalsUs(concat)

@@ -12,8 +12,8 @@ class RehearsalRenderersFactory(
 
     init {
         setEnableAudioFloatOutput(false)
-        // Скорость на AudioTrack, не Sonic drain: слайдер вниз больше не глушит sink.
-        setEnableAudioTrackPlaybackParams(true)
+        // WSOLA в MetronomePcmPipe на всех скоростях. AudioTrack 1×, без Sonic drain.
+        setEnableAudioTrackPlaybackParams(false)
         setEnableDecoderFallback(true)
     }
 
@@ -25,7 +25,7 @@ class RehearsalRenderersFactory(
         val sink = super.buildAudioSink(
             context,
             /* enableFloatOutput = */ false,
-            /* enableAudioTrackPlaybackParams = */ true,
+            /* enableAudioTrackPlaybackParams = */ false,
         ) ?: error("AudioSink недоступен")
         return MetronomeAudioSink(sink, clickEngine, mixBank)
     }

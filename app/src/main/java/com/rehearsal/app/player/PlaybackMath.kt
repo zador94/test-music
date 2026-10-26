@@ -1,6 +1,9 @@
 package com.rehearsal.app.player
 
 import com.rehearsal.app.audio.MetronomeClickEngine
+import java.util.Locale
+import kotlin.math.round
+import kotlin.math.roundToInt
 
 /** Чистая формула скорости и ввода BPM: без ExoPlayer, её же крутят тесты. */
 object PlaybackMath {
@@ -34,8 +37,7 @@ object PlaybackMath {
     fun clampMetronomeBpm(metronomeBpm: Float, committedOriginalBpm: Float): Float {
         val range = metronomeSliderRange(committedOriginalBpm)
         val value = if (metronomeBpm.isFinite()) metronomeBpm else range.start
-        val clamped = value.coerceIn(range.start, range.endInclusive)
-        return displayedBpm(clamped).toFloat().coerceIn(range.start, range.endInclusive)
+        return value.coerceIn(range.start, range.endInclusive)
     }
 
     /**
@@ -51,31 +53,52 @@ object PlaybackMath {
         return value
     }
 
-    fun sanitizeBpmDraft(raw: String): String =
-        raw.filter { it.isDigit() || it == '.' }.take(5)
+    fun sanitizeBpmDraft(raw: String): String {
+        val out = StringBuilder(5)
+        var seenDot = false
+        for (c in raw) {
+            when {
+                c.isDigit() -> out.append(c)
+                c == '.' && !seenDot -> {
+                    out.append('.')
+                    seenDot = true
+                }
+            }
+            if (out.length >= 5) break
+        }
+        return out.toString()
+    }
 
     fun commitOriginalBpm(draft: String, committedBpm: Float): OriginalBpmCommit {
         val parsed = parseOriginalBpm(draft)?.let { committedOriginalBpm(it) }
-        val display = (parsed ?: committedOriginalBpm(committedBpm)).toInt().toString()
+        val display = formatOriginalBpm(parsed ?: committedOriginalBpm(committedBpm))
         return OriginalBpmCommit(applyBpm = parsed, displayText = display)
     }
 
-    /**
-     * UI shows [displayedBpm] (`toInt`). Grid and speed must use that same integer:
-     * OLS 102.8 with a «102» label was a 0.8 BPM rush.
-     */
-    fun displayedBpm(bpm: Float): Int {
-        if (!bpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM.toInt()
-        return bpm.toInt().coerceIn(
-            MetronomeClickEngine.MIN_BPM.toInt(),
-            MetronomeClickEngine.MAX_BPM.toInt(),
+    fun roundToTenth(bpm: Float): Float {
+        if (!bpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM
+        val clamped = bpm.coerceIn(MetronomeClickEngine.MIN_BPM, MetronomeClickEngine.MAX_BPM)
+        return round(clamped * 10f) / 10f
+    }
+
+    fun formatOriginalBpm(bpm: Float): String =
+        String.format(Locale.US, "%.1f", committedOriginalBpm(bpm))
+
+    fun displayedMetronomeBpm(bpm: Float): Int {
+        if (!bpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM.roundToInt()
+        return bpm.roundToInt().coerceIn(
+            MetronomeClickEngine.MIN_BPM.roundToInt(),
+            MetronomeClickEngine.MAX_BPM.roundToInt(),
         )
     }
 
+    /**
+     * Сетка и поле оригинала: одно десятичное, не `toInt`.
+     * 104.6 при подписи «105» плывёт вдоль песни.
+     */
     fun committedOriginalBpm(originalBpm: Float): Float {
         if (!originalBpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM
-        val clamped = originalBpm.coerceIn(MetronomeClickEngine.MIN_BPM, MetronomeClickEngine.MAX_BPM)
-        return displayedBpm(clamped).toFloat()
+        return roundToTenth(originalBpm)
     }
 }
 

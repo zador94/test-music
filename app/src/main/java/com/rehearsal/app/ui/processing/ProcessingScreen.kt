@@ -33,10 +33,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.work.WorkInfo
 import com.rehearsal.app.data.TrackStatus
 import com.rehearsal.app.player.PlaybackPolicy
 import com.rehearsal.app.ui.theme.Daw
+import com.rehearsal.app.work.SplitChrome
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,8 +47,6 @@ fun ProcessingScreen(
 ) {
     val track by vm.track.collectAsStateWithLifecycle()
     val progress by vm.progress.collectAsStateWithLifecycle()
-    val message by vm.message.collectAsStateWithLifecycle()
-    val workState by vm.workState.collectAsStateWithLifecycle()
 
     LaunchedEffect(track) {
         val item = track ?: return@LaunchedEffect
@@ -96,30 +94,9 @@ fun ProcessingScreen(
                     .padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("HT-Demucs · 4 дорожки", color = Daw.accent, fontWeight = FontWeight.SemiBold)
-                Text(
-                    "Модель считает вокал, ударные, бас и музыку. Это настоящая нейросеть, не mid/side. " +
-                        "Первая песня скачает веса ~166 МБ, потом каждая песня — минуты на телефоне, " +
-                        "будет тепло и сядет батарея. Экран можно закрыть: задача останется.",
-                    color = Daw.muted,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    "6-stem (гитара отдельно) на устройство не ставим: слишком тяжело. Гитара будет в «Музыке».",
-                    color = Daw.muted,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(Daw.cardShape)
-                    .background(Daw.surface)
-                    .border(1.dp, Daw.line, Daw.cardShape)
-                    .padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
+                if (SplitChrome.windowStatusLine().isNotEmpty()) {
+                    Text(SplitChrome.windowStatusLine(), color = Daw.muted)
+                }
                 when (track?.status) {
                     TrackStatus.QUEUED, TrackStatus.PROCESSING -> {
                         if (progress in 1..99) {
@@ -129,7 +106,6 @@ fun ProcessingScreen(
                                 color = Daw.accent,
                                 trackColor = Daw.line,
                             )
-                            Text("$progress %", color = Daw.text, fontWeight = FontWeight.SemiBold)
                         } else {
                             LinearProgressIndicator(
                                 modifier = Modifier.fillMaxWidth(),
@@ -138,11 +114,9 @@ fun ProcessingScreen(
                             )
                         }
                         Text(
-                            message.ifBlank {
-                                if (workState == WorkInfo.State.RUNNING) "HT-Demucs работает…"
-                                else "В очереди WorkManager"
-                            },
-                            color = Daw.muted,
+                            SplitChrome.progressCaption(progress),
+                            color = Daw.text,
+                            fontWeight = FontWeight.SemiBold,
                         )
                     }
                     TrackStatus.READY -> Text("Готово. Четыре WAV в stems/.", color = Daw.bass)

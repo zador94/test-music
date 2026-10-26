@@ -54,6 +54,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.rehearsal.app.data.SplitKind
 import com.rehearsal.app.data.TrackEntity
 import com.rehearsal.app.data.TrackStatus
+import com.rehearsal.app.player.PlaybackMath
 import com.rehearsal.app.player.PlaybackPolicy
 import com.rehearsal.app.ui.theme.Daw
 
@@ -66,6 +67,7 @@ fun LibraryScreen(
 ) {
     val tracks by vm.tracks.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
+    val kickGridBusy by vm.kickGridBusy.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
     val picker = rememberLauncherForActivityResult(
@@ -142,6 +144,7 @@ fun LibraryScreen(
                 items(tracks, key = { it.id }) { track ->
                     TrackCard(
                         track = track,
+                        analyzingClick = track.id in kickGridBusy,
                         onClick = {
                             if (PlaybackPolicy.opensPlayer(track)) onOpenPlayer(track.id)
                             else onOpenProcessing(track.id)
@@ -193,6 +196,7 @@ private fun EmptyLibrary(modifier: Modifier = Modifier) {
 @Composable
 private fun TrackCard(
     track: TrackEntity,
+    analyzingClick: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -218,8 +222,11 @@ private fun TrackCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 StatusPill(track.status)
                 track.originalBpm?.let {
-                    MetaPill("${it.toInt()} BPM")
+                    MetaPill("${PlaybackMath.formatOriginalBpm(it)} BPM")
                 }
+            }
+            if (analyzingClick) {
+                Text("Анализ клика…", color = Daw.accent, style = MaterialTheme.typography.bodySmall)
             }
             splitHint(track.splitKind)?.let {
                 Text(it, color = Daw.muted, style = MaterialTheme.typography.bodySmall)

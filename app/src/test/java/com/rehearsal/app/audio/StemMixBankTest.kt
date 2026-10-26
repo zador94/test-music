@@ -127,7 +127,7 @@ class StemMixBankTest {
         val withFlag = ClickMix.copyAndMix(queued.duplicate(), ByteBuffer.allocateDirect(0), on, 0L, bank)
         assertFalse("stems-only mix must have signal", isSilent(stemsOnly))
         assertTrue(
-            "web architecture: clicks are not mixed into stem PCM",
+            "copyAndMix is stems only; click is mixed after stretch in the pipe",
             sameBytes(stemsOnly, withFlag),
         )
         bank.clear()
@@ -142,13 +142,29 @@ class StemMixBankTest {
         val stems = render(bank)
         assertTrue("muted stems are silence", isSilent(stems))
         val mixed = ClickMix.copyAndMix(stems.duplicate(), ByteBuffer.allocateDirect(0), engine, 0L, bank)
-        assertTrue("metronome must not inject clicks into muted stem PCM", isSilent(mixed))
-        val layer = ByteBuffer.allocateDirect(stems.remaining()).order(ByteOrder.nativeOrder())
-        layer.limit(stems.remaining())
-        ClickLayer.render(layer, engine, 0L, 1f)
-        layer.position(0)
-        assertFalse("stems muted → click layer still has energy", isSilent(layer))
-        assertTrue(peak(layer) > 0.85)
+        assertTrue("copyAndMix must not inject clicks (they mix after stretch)", isSilent(mixed))
+        val pipe = MetronomePcmPipe(engine, bank)
+        pipe.configure(
+            androidx.media3.common.Format.Builder()
+                .setSampleMimeType(androidx.media3.common.MimeTypes.AUDIO_RAW)
+                .setPcmEncoding(C.ENCODING_PCM_16BIT)
+                .setSampleRate(44100)
+                .setChannelCount(2)
+                .build(),
+        )
+        val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        var guard = 0
+        var accepted = false
+        val source = stems.duplicate()
+        while (guard < 10_000) {
+            accepted = pipe.handleBuffer(source, 0L, 1, sink::handleBuffer)
+            if (accepted) break
+            guard++
+        }
+        assertTrue(accepted)
+        val submitted = sink.lastSubmittedAsBuffer()
+        assertFalse("stems muted → sink PCM still has the click", isSilent(submitted))
+        assertTrue(peak(submitted) > 0.85)
         bank.clear()
     }
 
@@ -184,7 +200,8 @@ class StemMixBankTest {
         assertFalse(ClickMix.canLiveRemix(4096, C.ENCODING_PCM_16BIT, 2, C.TIME_UNSET, 1_000_000L))
         assertFalse(ClickMix.canLiveRemix(4096, C.ENCODING_PCM_16BIT, 2, 0L, 0L))
         assertFalse(ClickMix.canLiveRemix(4096, C.ENCODING_PCM_16BIT, 2, 1_000_000L, 1_000_000L))
-        assertFalse(ClickMix.canLiveRemix(6, C.ENCODING_PCM_16BIT, 2, 0L, 1_000_000L))
+        assertFalse(ClickMix.canLiveRemix(3, C.ENCODING_PCM_16BIT, 2, 0L, 1_000_000L))
+        assertTrue(ClickMix.canLiveRemix(6, C.ENCODING_PCM_16BIT, 2, 0L, 1_000_000L))
         assertTrue(ClickMix.canLiveRemix(4096, C.ENCODING_PCM_16BIT, 2, 0L, 1_000_000L))
     }
 

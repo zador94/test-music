@@ -1,6 +1,7 @@
 package com.rehearsal.app.audio
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BeatClockTest {
@@ -36,6 +37,45 @@ class BeatClockTest {
     }
 
     @Test
+    fun clickLeadIsCorrectedLaterNotEarlier() {
+        val interval = BeatClock.intervalUs(120f)
+        assertEquals(500_000L, interval)
+        val origin = 0L
+        val click = 0L
+        val kick = 80_000L
+        val corrected = BeatClock.alignOriginLater(origin, click, kick, interval)
+        assertEquals("gallop click-then-kick must delay origin to the kick", kick, corrected)
+        assertTrue("must move later", corrected > origin)
+        val earlierWrong = interval - kick
+        assertTrue(
+            "must not wrap earlier (would be $earlierWrong)",
+            kotlin.math.abs(corrected - kick) < kotlin.math.abs(corrected - earlierWrong),
+        )
+        assertEquals(
+            "already on/after the kick must not move earlier",
+            80_000L,
+            BeatClock.alignOriginLater(80_000L, 80_000L, 80_000L, interval),
+        )
+        assertEquals(
+            "late-sounding click must not pull origin earlier (worsens gallop)",
+            80_000L,
+            BeatClock.alignOriginLater(80_000L, clickUs = 90_000L, kickUs = 80_000L, interval),
+        )
+    }
+
+    @Test
+    fun gridOriginUsesKickPhaseNotBlindPad() {
+        val interval = BeatClock.intervalUs(120f)
+        val origin = BeatClock.gridOriginUs(80_000L, 0L, interval)
+        assertEquals(80_000L, origin)
+        assertEquals(80_000L, BeatClock.beatAtOrAfter(0L, interval, origin))
+        assertEquals(80_000L + interval, BeatClock.beatAtOrAfter(origin + 1L, interval, origin))
+        assertEquals(0L, BeatClock.kickPhaseUs(longArrayOf(), interval))
+        val mean = BeatClock.kickPhaseUs(longArrayOf(80_000L, 580_000L, 1_080_000L), interval)
+        assertEquals(80_000L, mean)
+    }
+
+    @Test
     fun gridHonorsDownbeatOrigin() {
         val interval = BeatClock.intervalUs(120f)
         val origin = 230_000L
@@ -46,6 +86,27 @@ class BeatClockTest {
             origin,
             BeatClock.firstOverlappingBeatUs(0L, interval, 6_000L, origin),
         )
+    }
+
+    @Test
+    fun sampleToMediaUsRoundTripsWithMediaUsToSampleAt44100() {
+        val sr = 44100
+        for (chunk in 0..40) {
+            val start = chunk * 1024
+            val pts = BeatClock.sampleToMediaUs(start.toLong(), sr)
+            assertEquals(
+                "chunk start $start pts=$pts",
+                start.toLong(),
+                BeatClock.mediaUsToSample(pts, sr),
+            )
+        }
+        val kick = (0.08 * sr).toInt()
+        val kickUs = TempoMath.secondsToMediaUs(0.08)
+        assertEquals(kick.toLong(), BeatClock.mediaUsToSample(kickUs, sr))
+        val pts = BeatClock.sampleToMediaUs(3L * 1024, sr)
+        val musicLocal = kick - BeatClock.mediaUsToSample(pts, sr).toInt()
+        val clickLocal = BeatClock.frameOffset(kickUs, pts, sr)
+        assertEquals("live-remix music vs click in chunk 3", musicLocal, clickLocal)
     }
 
     @Test

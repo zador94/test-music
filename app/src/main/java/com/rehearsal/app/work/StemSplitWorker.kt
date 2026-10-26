@@ -18,6 +18,7 @@ import com.rehearsal.app.RehearsalApplication
 import com.rehearsal.app.audio.AudioBuffers
 import com.rehearsal.app.audio.HtDemucs
 import com.rehearsal.app.audio.HtdemucsModelStore
+import com.rehearsal.app.audio.KickGrid
 import com.rehearsal.app.audio.StereoPcm
 import com.rehearsal.app.audio.TempoDetector
 import com.rehearsal.app.audio.TrackAnalysis
@@ -40,7 +41,7 @@ class StemSplitWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
-        return foreground("HT-Demucs: готовим 4 дорожки")
+        return foreground()
     }
 
     override suspend fun doWork(): Result {
@@ -56,7 +57,7 @@ class StemSplitWorker(
 
         ensureChannel()
         try {
-            setForeground(foreground("HT-Demucs: скачивание модели / разделение"))
+            setForeground(foreground())
         } catch (_: Exception) {
         }
 
@@ -110,6 +111,9 @@ class StemSplitWorker(
                 }
             }
 
+            report(96, "Сетка по бочке")
+            refineKickGrid(dao, files, trackId, separated.getValue(StemId.DRUMS))
+
             val note = "HT-Demucs (htdemucs) ONNX, 4 стемы, WAV IEEE float32. Гитара в «Музыка» (other)."
             files.writeStemReadme(trackId, SplitKind.HTDEMUCS_4STEM, note)
             dao.updateSplit(
@@ -156,6 +160,21 @@ class StemSplitWorker(
         dao.getById(trackId)?.let { files.writeMeta(it) }
     }
 
+    private suspend fun refineKickGrid(
+        dao: TrackDao,
+        files: TrackFileStore,
+        trackId: String,
+        drums: StereoPcm,
+    ) {
+        val file = files.analysisJson(trackId)
+        val existing = TrackAnalysis.fromFile(file)
+            ?: TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate)
+        val refined = KickGrid.refine(existing, drums)
+        files.writeAnalysis(trackId, refined)
+        dao.updateBpm(trackId, refined.bpm, System.currentTimeMillis())
+        dao.getById(trackId)?.let { files.writeMeta(it) }
+    }
+
     private suspend fun markProcessing(dao: TrackDao, files: TrackFileStore, trackId: String) {
         dao.updateSplit(
             id = trackId,
@@ -175,13 +194,15 @@ class StemSplitWorker(
         setProgressAsync(workDataOf(KEY_PROGRESS to percent, KEY_MESSAGE to message))
     }
 
-    private fun foreground(text: String): ForegroundInfo {
+    private fun foreground(): ForegroundInfo {
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_split)
-            .setContentTitle(applicationContext.getString(R.string.split_notification_title))
-            .setContentText(text)
+            .setContentTitle(SplitChrome.NOTIFICATION_TITLE)
+            .setContentText(SplitChrome.NOTIFICATION_TEXT)
             .setOngoing(true)
             .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .build()
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ForegroundInfo(
@@ -222,7 +243,7 @@ class StemSplitWorker(
         val channel = NotificationChannel(
             CHANNEL_ID,
             applicationContext.getString(R.string.split_channel_name),
-            NotificationManager.IMPORTANCE_LOW,
+            NotificationManager.IMPORTANCE_MIN,
         )
         manager.createNotificationChannel(channel)
     }

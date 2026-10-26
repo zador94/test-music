@@ -54,22 +54,24 @@ class ClickLayerTest {
             (MetronomeClickEngine.CLICK_DURATION_SEC * 44100).toLong().coerceAtLeast(32),
         )
         assertEquals(1f, MetronomeClickEngine.CLICK_GAIN, 1e-4f)
+        assertEquals(2.2f, MetronomeClickEngine.CLICK_VOLUME, 1e-4f)
     }
 
     @Test
-    fun layerDoesNotDependOnSinkMime() {
+    fun aacMimeStillMixesPcmClick() {
         val engine = MetronomeClickEngine()
         engine.configure(
             Format.Builder()
                 .setSampleMimeType(MimeTypes.AUDIO_AAC)
-                .setSampleRate(48000)
-                .setChannelCount(1)
+                .setSampleRate(44100)
+                .setChannelCount(2)
                 .build(),
         )
         engine.originalBpm = 120f
         engine.enabled = true
+        assertTrue("0.3.8: AAC mime at the sink is still decoded PCM", engine.isPcm())
         val out = layer(engine, silence(2048), 0L)
-        assertFalse("click layer is its own 44.1 stereo track, not sink mime", isSilent(out))
+        assertFalse(isSilent(out))
         assertTrue(peak(out) > 0.85)
     }
 
@@ -79,20 +81,6 @@ class ClickLayerTest {
         val out = layer(engine, silence(2048), C.TIME_UNSET)
         assertFalse(isSilent(out))
         assertTrue(peak(out) > 0.85)
-    }
-
-    @Test
-    fun lookaheadChunkIsAbout120ms() {
-        val frames = ClickLayer.chunkFrames()
-        val sec = frames.toDouble() / ClickLayer.SAMPLE_RATE
-        assertTrue("web lookahead 0.12s wall, was $sec", sec in 0.10..0.15)
-        assertEquals(0.12f, ClickLayer.LOOKAHEAD_SEC, 1e-4f)
-        assertTrue(ClickLayer.lookaheadUs(1.5f) > ClickLayer.lookaheadUs(1f))
-        assertTrue(
-            "media window scales with playbackRate",
-            ClickLayer.mediaAdvanceUs(2f) > ClickLayer.mediaAdvanceUs(1f),
-        )
-        assertTrue(ClickLayer.mediaAdvanceUs(1f) in 100_000L..150_000L)
     }
 
     @Test

@@ -195,13 +195,13 @@ class StemMixMediaSource(
             .build()
 
         private fun byteCount(durationUs: Long, sampleRate: Int, frameSize: Int): Long {
-            val samples = durationUs * sampleRate.coerceAtLeast(1) / C.MICROS_PER_SECOND
+            val samples = BeatClock.mediaUsToSample(durationUs, sampleRate.coerceAtLeast(1))
             return samples * frameSize
         }
 
         private fun positionUs(bytes: Long, sampleRate: Int, frameSize: Int): Long {
             val samples = bytes / frameSize.coerceAtLeast(1)
-            return samples * C.MICROS_PER_SECOND / sampleRate.coerceAtLeast(1)
+            return BeatClock.sampleToMediaUs(samples, sampleRate.coerceAtLeast(1))
         }
     }
 }

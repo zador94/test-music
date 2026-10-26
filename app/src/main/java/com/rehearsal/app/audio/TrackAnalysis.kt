@@ -18,6 +18,8 @@ data class TrackAnalysis(
     val sampleRate: Int = TempoDetector.SAMPLE_RATE,
     val separator: String = SplitKind.HTDEMUCS_4STEM,
     val stems: List<String> = DEFAULT_STEMS,
+    val kickPhaseSec: Double = 0.0,
+    val kickGridVersion: Int = 0,
 ) {
     fun beatTimesUs(): LongArray {
         val out = LongArray(beats.size) { i ->
@@ -39,6 +41,8 @@ data class TrackAnalysis(
         return buildString {
             appendLine("{")
             appendLine("  \"bpm\": ${formatNum(bpm.toDouble())},")
+            appendLine("  \"kickPhaseSec\": ${formatNum(kickPhaseSec)},")
+            appendLine("  \"kickGridVersion\": $kickGridVersion,")
             append("  \"beats\": [")
             if (beatsBody.isNotEmpty()) {
                 appendLine()
@@ -105,6 +109,11 @@ data class TrackAnalysis(
                 }
                 val separator = extractString(text, "separator") ?: SplitKind.HTDEMUCS_4STEM
                 val stems = extractStringArray(text, "stems").ifEmpty { DEFAULT_STEMS }
+                val kickPhase = extractNumber(text, "kickPhaseSec") ?: 0.0
+                val kickGridVersion = extractNumber(text, "kickGridVersion")
+                    ?.roundToLong()
+                    ?.toInt()
+                    ?: 0
                 TrackAnalysis(
                     bpm = bpm.toFloat(),
                     beats = beats,
@@ -114,6 +123,8 @@ data class TrackAnalysis(
                     sampleRate = sampleRate,
                     separator = separator,
                     stems = stems,
+                    kickPhaseSec = kickPhase,
+                    kickGridVersion = kickGridVersion,
                 )
             } catch (_: Throwable) {
                 null

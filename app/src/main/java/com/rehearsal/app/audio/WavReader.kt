@@ -31,6 +31,28 @@ class MappedWav(
         } catch (_: Exception) {
         }
     }
+
+    fun toStereoPcm(): StereoPcm {
+        val n = info.frameCount.coerceAtLeast(0)
+        val left = FloatArray(n)
+        val right = FloatArray(n)
+        val stride = (info.channels * info.bytesPerSample).coerceAtLeast(1)
+        for (i in 0 until n) {
+            val base = i * stride
+            left[i] = sampleAt(base)
+            right[i] = if (info.channels > 1) sampleAt(base + info.bytesPerSample) else left[i]
+        }
+        return StereoPcm(info.sampleRate, left, right)
+    }
+
+    private fun sampleAt(index: Int): Float {
+        if (index < 0 || index + info.bytesPerSample > data.capacity()) return 0f
+        return if (info.isFloat32) {
+            data.getFloat(index)
+        } else {
+            data.getShort(index) / 32768f
+        }
+    }
 }
 
 /**
@@ -38,6 +60,15 @@ class MappedWav(
  * Канал файла остаётся открытым, пока жив mmap.
  */
 object WavReader {
+    fun readStereo(file: File): StereoPcm {
+        val mapped = openMapped(file)
+        try {
+            return mapped.toStereoPcm()
+        } finally {
+            mapped.close()
+        }
+    }
+
     fun openMapped(file: File): MappedWav {
         val raf = RandomAccessFile(file, "r")
         try {

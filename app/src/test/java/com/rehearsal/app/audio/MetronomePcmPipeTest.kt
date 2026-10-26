@@ -142,7 +142,7 @@ class MetronomePcmPipeTest {
     }
 
     @Test
-    fun stemPipeDoesNotCarryClicks() {
+    fun stemPipeCarriesClicksAfterStretch() {
         val bank = StemMixBank()
         bank.load(WavFixtures.writeStemSet(tmp.newFolder("pipe-click")))
         StemId.entries.forEach { bank.setGain(it, 0.12f) }
@@ -162,18 +162,10 @@ class MetronomePcmPipeTest {
         assertTrue(drain(onPipe, source.duplicate(), 0L, onSink))
 
         val stemsOnly = offSink.lastSubmittedAsBuffer()
-        val withFlag = onSink.lastSubmittedAsBuffer()
+        val withClick = onSink.lastSubmittedAsBuffer()
         assertFalse(isAllZeros(stemsOnly))
-        assertEquals(
-            "clicks are not in the stem pipe; dedicated ClickLayer",
-            stemsOnly.remaining(),
-            withFlag.remaining(),
-        )
-        val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
-        layer.limit(1024 * 4)
-        ClickLayer.render(layer, on, 0L, 1f)
-        layer.position(0)
-        assertTrue("click layer energy independent of stem pipe", peak(layer) > 0.85)
+        assertEquals(stemsOnly.remaining(), withClick.remaining())
+        assertTrue("click must be in the PCM submitted to the sink", peak(withClick) > peak(stemsOnly))
         bank.clear()
     }
 
@@ -181,12 +173,27 @@ class MetronomePcmPipeTest {
     fun timeUnsetStillMixesClickEnergy() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
-        val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
-        layer.limit(1024 * 4)
-        ClickLayer.render(layer, engine, C.TIME_UNSET, 1f)
-        layer.position(0)
-        assertFalse("TIME_UNSET playhead still clicks on the dedicated layer", isAllZeros(layer))
-        assertTrue(peak(layer) > 0.5)
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(pcm16Format())
+        val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        assertTrue(drain(pipe, sinePcm16(1024), C.TIME_UNSET, sink))
+        val submitted = sink.lastSubmittedAsBuffer()
+        assertFalse("TIME_UNSET still mixes click into sink PCM", isAllZeros(submitted))
+        assertTrue(peak(submitted) > 0.5)
+    }
+
+    @Test
+    fun softwareSpeedDownSubmitsMoreBytesWithoutSilencing() {
+        val engine = engine(enabled = false)
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(pcm16Format())
+        pipe.softwareSpeed = 0.5f
+        val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        val music = sinePcm16(frames = 300)
+        assertTrue(drain(pipe, music, 0L, sink))
+        val out = sink.lastSubmittedAsBuffer()
+        assertEquals(600 * 4, out.remaining())
+        assertFalse(isAllZeros(out))
     }
 
     @Test
@@ -215,12 +222,20 @@ class MetronomePcmPipeTest {
         )
         engine.originalBpm = 120f
         engine.enabled = true
-        val layer = ByteBuffer.allocateDirect(1024 * 4).order(ByteOrder.nativeOrder())
-        layer.limit(1024 * 4)
-        ClickLayer.render(layer, engine, 0L, 1f)
-        layer.position(0)
-        assertFalse("click layer ignores sink mime/pcmEncoding", isAllZeros(layer))
-        assertTrue(peak(layer) > 0.5)
+        assertTrue(engine.isPcm())
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(
+            Format.Builder()
+                .setSampleMimeType(MimeTypes.AUDIO_RAW)
+                .setSampleRate(44100)
+                .setChannelCount(2)
+                .build(),
+        )
+        val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
+        assertTrue(drain(pipe, sinePcm16(1024), 0L, sink))
+        val submitted = sink.lastSubmittedAsBuffer()
+        assertFalse("missing pcmEncoding still mixes click into sink PCM", isAllZeros(submitted))
+        assertTrue(peak(submitted) > 0.5)
     }
 
     @Test
@@ -350,44 +365,5 @@ class MetronomePcmPipeTest {
             if (dup.get() != 0.toByte()) return false
         }
         return true
-    }
-}
-
-/**
- * Как DefaultAudioSink: один и тот же ByteBuffer, пока не съеден целиком.
- * Другой инстанс → IllegalArgumentException (стоп плеера в 0.3.1).
- */
-private class IdentityAudioSink(var bytesPerAccept: Int) {
-    private var pending: ByteBuffer? = null
-    val submitted = ArrayList<ByteArray>()
-    var drainHoldCount: Int = 0
-
-    fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
-        val held = pending
-        if (held != null && held !== buffer) {
-            throw IllegalArgumentException(
-                "DefaultAudioSink requires the same ByteBuffer until consumed",
-            )
-        }
-        if (drainHoldCount > 0) {
-            drainHoldCount--
-            pending = buffer
-            return false
-        }
-        pending = buffer
-        val consume = minOf(buffer.remaining(), bytesPerAccept)
-        val copy = ByteArray(consume)
-        buffer.get(copy)
-        submitted.add(copy)
-        val done = !buffer.hasRemaining()
-        if (done) pending = null
-        return done
-    }
-
-    fun isAllZeros(): Boolean = submitted.all { chunk -> chunk.all { it == 0.toByte() } }
-
-    fun lastSubmittedAsBuffer(): ByteBuffer {
-        val all = submitted.fold(ByteArray(0)) { acc, chunk -> acc + chunk }
-        return ByteBuffer.wrap(all).order(ByteOrder.LITTLE_ENDIAN)
     }
 }

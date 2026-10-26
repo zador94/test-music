@@ -21,6 +21,9 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     val tracks: StateFlow<List<TrackEntity>> = app.repository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val kickGridBusy: StateFlow<Set<String>> = app.repository.kickGridBusy
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
     private val _importing = MutableStateFlow(false)
     val importing: StateFlow<Boolean> = _importing.asStateFlow()
 
@@ -29,6 +32,17 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _openProcessing = MutableSharedFlow<String>()
     val openProcessing = _openProcessing.asSharedFlow()
+
+    init {
+        viewModelScope.launch {
+            tracks.collect { list ->
+                list.forEach { track ->
+                    if (track.drumsPath.isNullOrBlank()) return@forEach
+                    launch { app.repository.refreshKickGrid(track.id, force = false) }
+                }
+            }
+        }
+    }
 
     fun importUri(uri: Uri) {
         viewModelScope.launch {

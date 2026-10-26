@@ -19,11 +19,12 @@ class PlaybackMathTest {
     }
 
     @Test
-    fun committedOriginalBpmMatchesDisplayedInteger() {
-        assertEquals(102f, PlaybackMath.committedOriginalBpm(102.8f), 0f)
-        assertEquals(102, PlaybackMath.displayedBpm(102.8f))
-        assertEquals(1f, PlaybackMath.playbackSpeed(102f, PlaybackMath.committedOriginalBpm(102.8f)), 1e-5f)
-        assertEquals(102f, PlaybackMath.clampMetronomeBpm(102.8f, 102f), 0f)
+    fun committedOriginalBpmMatchesDisplayedTenth() {
+        assertEquals(104.6f, PlaybackMath.committedOriginalBpm(104.63f), 0.01f)
+        assertEquals("104.6", PlaybackMath.formatOriginalBpm(104.63f))
+        assertEquals(102.8f, PlaybackMath.committedOriginalBpm(102.84f), 0.01f)
+        assertEquals(1f, PlaybackMath.playbackSpeed(104.6f, PlaybackMath.committedOriginalBpm(104.63f)), 1e-3f)
+        assertEquals(104.6f, PlaybackMath.clampMetronomeBpm(104.6f, 104.6f), 0.01f)
     }
 
     @Test

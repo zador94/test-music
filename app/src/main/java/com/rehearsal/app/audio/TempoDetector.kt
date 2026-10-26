@@ -1,6 +1,7 @@
 package com.rehearsal.app.audio
 
 import com.rehearsal.app.data.SplitKind
+import com.rehearsal.app.player.PlaybackMath
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -38,7 +39,7 @@ object TempoDetector {
         }
         val measured = TempoMath.bpmFromBeats(beats, refined) ?: refined
         return TrackAnalysis(
-            bpm = measured.toFloat(),
+            bpm = PlaybackMath.roundToTenth(measured.toFloat()),
             beats = beats,
             downbeatOffset = offset,
             timeSignature = intArrayOf(4, 4),

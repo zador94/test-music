@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.rehearsal.app.audio.ClickCalibration
 import com.rehearsal.app.player.PlaybackMath
 import com.rehearsal.app.data.SplitKind
 import com.rehearsal.app.data.StemId
@@ -127,6 +128,8 @@ fun PlayerScreen(
                 ui = ui,
                 onEnabled = vm::setMetronomeOn,
                 onBpm = vm::setMetronomeBpm,
+                onClickShift = vm::setClickShiftMs,
+                onRecalculateKickGrid = vm::recalculateKickGrid,
             )
 
             OriginalBpmField(
@@ -261,7 +264,7 @@ private fun OriginalBpmField(text: String, onChange: (String) -> Unit) {
                 },
             supportingText = {
                 Text(
-                    "30–240. Пишите число, применится по Done или когда уйдёте из строки. Пока набираете — плеер не трогаем.",
+                    "30–240, можно десятые (104.6). Пишите число, применится по Done или когда уйдёте из строки. Пока набираете — плеер не трогаем.",
                     color = Daw.muted,
                 )
             },
@@ -292,6 +295,8 @@ private fun MetronomeBlock(
     ui: PlayerUi,
     onEnabled: (Boolean) -> Unit,
     onBpm: (Float) -> Unit,
+    onClickShift: (Int) -> Unit,
+    onRecalculateKickGrid: () -> Unit,
 ) {
     DawCard {
         Row(
@@ -316,7 +321,10 @@ private fun MetronomeBlock(
                 ),
             )
         }
-        Text("Желаемый BPM: ${ui.metronomeBpm.toInt()}", color = Daw.text)
+        Text(
+            "Желаемый BPM: ${PlaybackMath.displayedMetronomeBpm(ui.metronomeBpm)}",
+            color = Daw.text,
+        )
         val original = ui.originalBpm
         val range = PlaybackMath.metronomeSliderRange(original)
         val sliderValue = PlaybackMath.clampMetronomeBpm(ui.metronomeBpm, original)
@@ -333,11 +341,50 @@ private fun MetronomeBlock(
         Text(
             String.format(
                 Locale.US,
-                "Скорость = %d / %d = ×%.2f. Тон не меняется.",
-                ui.metronomeBpm.toInt(),
-                original.toInt(),
+                "Скорость = %d / %.1f = ×%.2f. Тон не меняется.",
+                PlaybackMath.displayedMetronomeBpm(ui.metronomeBpm),
+                PlaybackMath.committedOriginalBpm(original),
                 ui.speed,
             ),
+            color = Daw.muted,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text("Сдвиг клика, мс: ${ui.clickShiftMs}", color = Daw.text)
+        Slider(
+            value = ui.clickShiftMs.toFloat(),
+            onValueChange = { onClickShift(it.roundToInt()) },
+            valueRange = ClickCalibration.MIN_MS.toFloat()..ClickCalibration.MAX_MS.toFloat(),
+            steps = ClickCalibration.sliderSteps(),
+            colors = SliderDefaults.colors(
+                thumbColor = Daw.accent,
+                activeTrackColor = Daw.accent,
+                inactiveTrackColor = Daw.line,
+            ),
+        )
+        Text(
+            "Поверх фазы бочки. 0 — как в анализе, плюс — позже, минус — раньше.",
+            color = Daw.muted,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (ui.kickGridBusy) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                color = Daw.accent,
+                trackColor = Daw.line,
+            )
+            Text(
+                "Анализ клика…",
+                color = Daw.muted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        DawTextButton(
+            label = "Пересчитать темп и фазу",
+            onClick = onRecalculateKickGrid,
+            enabled = !ui.kickGridBusy,
+        )
+        Text(
+            "Только по stem ударных, без HT-Demucs. Если клик сидит не на бочке после обновления приложения — нажмите.",
             color = Daw.muted,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -463,16 +510,20 @@ private fun DawCard(content: @Composable androidx.compose.foundation.layout.Colu
 }
 
 @Composable
-private fun DawTextButton(label: String, onClick: () -> Unit) {
+private fun DawTextButton(label: String, onClick: () -> Unit, enabled: Boolean = true) {
     Box(
         modifier = Modifier
             .clip(Daw.pillShape)
             .background(Daw.surfaceHigh)
-            .border(1.dp, Daw.accent, Daw.pillShape)
-            .clickable(onClick = onClick)
+            .border(1.dp, if (enabled) Daw.accent else Daw.line, Daw.pillShape)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        Text(label, color = Daw.accent, fontWeight = FontWeight.SemiBold)
+        Text(
+            label,
+            color = if (enabled) Daw.accent else Daw.muted,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 

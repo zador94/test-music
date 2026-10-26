@@ -93,7 +93,11 @@ class StemMixBank {
         }
         val rate = sampleRate.coerceAtLeast(1)
         val pts = presentationTimeUs.coerceAtLeast(0L)
-        val startFrame = ((pts * rate) / 1_000_000L).toInt()
+        // Inverse of StemMixMediaSource / BeatClock.sampleToMediaUs. Floor
+        // `(pts * rate) / 1e6` is 1 sample early on some chunks (e.g. 3072 →
+        // pts 69659 → 3071), so live-remix music and the click (round-trip)
+        // sat 1 sample apart. Not 170 ms — but the same mapping the click uses.
+        val startFrame = BeatClock.mediaUsToSample(pts, rate).toInt()
         val frames = out.remaining() / frameSize
         val g0 = gainAt(0)
         val g1 = gainAt(1)

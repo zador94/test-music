@@ -92,6 +92,8 @@ class TempoDetectorTest {
         val parsed = TrackAnalysis.fromJson(original.toJson())
         assertNotNull(parsed)
         assertEquals(original.bpm, parsed!!.bpm, 1e-3f)
+        assertEquals(original.kickPhaseSec, parsed.kickPhaseSec, 1e-6)
+        assertEquals(original.kickGridVersion, parsed.kickGridVersion)
         assertEquals(original.beats.size, parsed.beats.size)
         assertEquals(original.duration, parsed.duration, 1e-6)
         assertEquals(original.sampleRate, parsed.sampleRate)
