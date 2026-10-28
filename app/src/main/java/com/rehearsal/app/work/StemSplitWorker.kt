@@ -16,12 +16,14 @@ import androidx.work.workDataOf
 import com.rehearsal.app.R
 import com.rehearsal.app.RehearsalApplication
 import com.rehearsal.app.audio.AudioBuffers
+import com.rehearsal.app.audio.DemucsChunkPlan
 import com.rehearsal.app.audio.HtDemucs
 import com.rehearsal.app.audio.HtdemucsModelStore
 import com.rehearsal.app.audio.KickGrid
-import com.rehearsal.app.audio.StereoPcm
+import com.rehearsal.app.audio.MinChunkOomException
 import com.rehearsal.app.audio.TempoDetector
 import com.rehearsal.app.audio.TrackAnalysis
+import com.rehearsal.app.audio.WavReader
 import com.rehearsal.app.audio.WavWriter
 import com.rehearsal.app.data.SplitKind
 import com.rehearsal.app.data.StemId
@@ -29,9 +31,11 @@ import com.rehearsal.app.data.TrackDao
 import com.rehearsal.app.data.TrackFileStore
 import com.rehearsal.app.data.TrackStatus
 import java.io.File
+import java.util.Locale
 
 /**
- * Один проход HT-Demucs ONNX (htdemucs, не FT-bag и не 6-stem).
+ * HT-Demucs ONNX (htdemucs, не FT-bag и не 6-stem) окнами модели 7.8 с на диск.
+ * Overlap-add как in-memory 0.3.28; без внешнего слоя 30 с / линейного кроссфейда.
  * Пишет tracks/{id}/stems/{vocals,drums,bass,other}.wav
  * Unique work + KEEP: повторный вход не гоняет модель снова, пока нет «пересчитать».
  */
@@ -69,6 +73,7 @@ class StemSplitWorker(
         }
 
         val stemFiles = StemId.entries.associateWith { files.stemWav(trackId, it) }
+        val mixWav = files.mixWorkWav(trackId)
         try {
             val models = HtdemucsModelStore(applicationContext, files)
             report(5, "Скачиваю HT-Demucs (~166 МБ), один раз")
@@ -86,35 +91,21 @@ class StemSplitWorker(
                 )
             }
 
-            report(22, "Декодирую исходник в 44.1 кГц stereo")
-            val mix = AudioBuffers.decodeToStereo44100(original)
+            report(22, "Декодирую исходник в 44.1 кГц на диск")
+            AudioBuffers.decodeToWav44100(original, mixWav)
             report(25, "Считаю BPM и доли")
-            persistAnalysis(dao, files, trackId, mix)
+            persistAnalysisFromMixWav(dao, files, trackId, mixWav)
+            System.gc()
 
-            report(28, "HT-Demucs считает стемы. Минуты, телефон греется.")
-
-            val separated = HtDemucs.separate(mix, model) { index, total ->
-                val pct = 28 + (index * 62 / total)
-                setProgressAsync(
-                    workDataOf(
-                        KEY_PROGRESS to pct.coerceIn(28, 90),
-                        KEY_MESSAGE to "Чанк $index из $total (по 7.8 с)",
-                    ),
-                )
-            }
-
-            report(92, "Пишу WAV")
-            StemId.entries.forEach { stem ->
-                val pcm = separated.getValue(stem)
-                WavWriter(stemFiles.getValue(stem), HtDemucs.SAMPLE_RATE, channels = 2).use { writer ->
-                    writer.writePlanarFloatStereo(pcm.left, pcm.right)
-                }
-            }
+            report(28, "HT-Demucs окна 7.8 с, overlap-add на диск")
+            splitMixStreaming(mixWav, model, stemFiles)
 
             report(96, "Сетка по бочке")
-            refineKickGrid(dao, files, trackId, separated.getValue(StemId.DRUMS))
+            refineKickGridFromDrumsFile(dao, files, trackId, stemFiles.getValue(StemId.DRUMS))
 
-            val note = "HT-Demucs (htdemucs) ONNX, 4 стемы, WAV IEEE float32. Гитара в «Музыка» (other)."
+            val note =
+                "HT-Demucs (htdemucs) ONNX, 4 стемы, WAV IEEE float32. Окна модели 7.8 с, " +
+                    "overlap-add как 0.3.28, стемы сразу на диск. Гитара в «Музыка» (other)."
             files.writeStemReadme(trackId, SplitKind.HTDEMUCS_4STEM, note)
             dao.updateSplit(
                 id = trackId,
@@ -130,42 +121,97 @@ class StemSplitWorker(
             dao.getById(trackId)?.let { files.writeMeta(it) }
             report(100, "Готово")
             return Result.success()
+        } catch (_: MinChunkOomException) {
+            stemFiles.values.forEach { it.delete() }
+            return fail(dao, files, trackId, DemucsChunkPlan.SHORT_TRACK_MESSAGE)
         } catch (oom: OutOfMemoryError) {
             stemFiles.values.forEach { it.delete() }
-            return fail(
-                dao,
-                files,
-                trackId,
-                "Не хватило RAM для HT-Demucs. Попробуйте более короткий трек.",
-            )
+            return fail(dao, files, trackId, oom.message ?: oom.javaClass.simpleName)
         } catch (t: Throwable) {
             stemFiles.values.forEach { it.delete() }
             return fail(dao, files, trackId, t.message ?: t.javaClass.simpleName)
+        } finally {
+            mixWav.delete()
         }
     }
 
-    private suspend fun persistAnalysis(
+    private fun splitMixStreaming(
+        mixWav: File,
+        model: File,
+        stemFiles: Map<StemId, File>,
+    ) {
+        HtDemucs.withSession(model) { session ->
+            val writers = HashMap<StemId, WavWriter>()
+            try {
+                StemId.entries.forEach { stem ->
+                    writers[stem] = WavWriter(
+                        stemFiles.getValue(stem),
+                        HtDemucs.SAMPLE_RATE,
+                        channels = 2,
+                    )
+                }
+                HtDemucs.streamSeparate(mixWav, session, writers) { index, total ->
+                    val pct = 28 + (index * 62 / total.coerceAtLeast(1))
+                    setProgressAsync(
+                        workDataOf(
+                            KEY_PROGRESS to pct.coerceIn(28, 90),
+                            KEY_MESSAGE to String.format(
+                                Locale.US,
+                                "HT-Demucs окно %d из %d (7.8 с, overlap-add)",
+                                index,
+                                total,
+                            ),
+                        ),
+                    )
+                }
+            } catch (t: Throwable) {
+                stemFiles.values.forEach { it.delete() }
+                if (DemucsChunkPlan.isMemoryFailure(t)) {
+                    throw MinChunkOomException()
+                }
+                throw t
+            } finally {
+                writers.values.forEach { writer ->
+                    try {
+                        writer.close()
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun persistAnalysisFromMixWav(
         dao: TrackDao,
         files: TrackFileStore,
         trackId: String,
-        mix: StereoPcm,
+        mixWav: File,
     ) {
+        val frames = WavReader.frameCount(mixWav)
         val analysis = try {
+            val mix = WavReader.readStereo(mixWav)
             TempoDetector.analyze(mix)
+        } catch (_: OutOfMemoryError) {
+            TrackAnalysis.fallbackGrid(frames, HtDemucs.SAMPLE_RATE)
         } catch (_: Throwable) {
-            TrackAnalysis.fallbackGrid(mix.samples, mix.sampleRate)
+            TrackAnalysis.fallbackGrid(frames, HtDemucs.SAMPLE_RATE)
         }
         files.writeAnalysis(trackId, analysis)
         dao.updateBpm(trackId, analysis.bpm, System.currentTimeMillis())
         dao.getById(trackId)?.let { files.writeMeta(it) }
     }
 
-    private suspend fun refineKickGrid(
+    private suspend fun refineKickGridFromDrumsFile(
         dao: TrackDao,
         files: TrackFileStore,
         trackId: String,
-        drums: StereoPcm,
+        drumsFile: File,
     ) {
+        val drums = try {
+            WavReader.readStereo(drumsFile)
+        } catch (_: OutOfMemoryError) {
+            return
+        }
         val file = files.analysisJson(trackId)
         val existing = TrackAnalysis.fromFile(file)
             ?: TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate)

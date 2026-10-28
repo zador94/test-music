@@ -17,7 +17,7 @@ import kotlin.math.sqrt
  * Онсет — начало низкой энергии / HF-щелчок. Фаза — четверти, не синкопа 16-й.
  */
 object KickGrid {
-    const val VERSION = 4
+    const val VERSION = 8
     const val HOP = TempoDetector.HOP
     const val LOWPASS_HZ = 150.0
     const val MID_LOW_HZ = 100.0
@@ -130,8 +130,14 @@ object KickGrid {
         val onsets = pickEnergyOnsets(energy, flux, hf, HOP, sr, duration)
         val infos = describeOnsets(onsets, energy, flux, mid, HOP, sr)
         val rawBpm = TempoDetector.estimateBpm(flux, HOP, sr)
-        val seed = TempoMath.clampHalfDouble(rawBpm)
-        val chosen = chooseGrid(infos, energy, seed, duration, HOP, sr)
+        val seed = TempoMath.foldDoubleBallad(TempoMath.clampHalfDouble(rawBpm))
+        val chosen = foldBalladGrid(
+            chooseGrid(infos, energy, seed, duration, HOP, sr, rawBpm),
+            infos,
+            energy,
+            HOP,
+            sr,
+        )
         val spread = onsetPeakSpreadSec(energy, onsets, HOP, sr)
         val roundedBpm = PlaybackMath.roundToTenth(chosen.bpm.toFloat())
         val period = 60.0 / roundedBpm.toDouble().coerceAtLeast(1.0)
@@ -184,9 +190,28 @@ object KickGrid {
         } catch (_: Throwable) {
             return existing
         }
+        // Фаза — по бочке. BPM файла не удваиваем, если drums — октава / 8/9.
+        // Иначе (fallback 120 vs реальные 104.6) берём сетку KickGrid.
+        val fileBpm = TempoMath.foldDoubleBallad(existing.bpm.toDouble())
+        val drumsBpm = result.bpm.toDouble()
+        val resolved = when {
+            !fileBpm.isFinite() || fileBpm <= 0.0 -> drumsBpm
+            TempoMath.isOctaveFamily(fileBpm, drumsBpm) -> fileBpm
+            TempoMath.relativeClose(fileBpm, drumsBpm, 0.08) -> fileBpm
+            else -> drumsBpm
+        }
+        val bpm = PlaybackMath.roundToTenth(TempoMath.foldDoubleBallad(resolved).toFloat())
+        val phaseSec = if (TempoMath.relativeClose(bpm.toDouble(), result.bpm.toDouble(), 0.05)) {
+            result.kickPhaseSec
+        } else {
+            val infos = strongKickOnsets(result.onsetInfos).ifEmpty { result.onsetInfos }
+            val hopSec = hopSec(drums.sampleRate)
+            rankPhases(infos, bpm.toDouble(), hopSec, FloatArray(0), HOP, drums.sampleRate)
+                .firstOrNull()?.phaseSec ?: result.kickPhaseSec
+        }
         return existing.copy(
-            bpm = result.bpm,
-            kickPhaseSec = result.kickPhaseSec,
+            bpm = bpm,
+            kickPhaseSec = phaseSec,
             kickGridVersion = VERSION,
         )
     }
@@ -340,6 +365,7 @@ object KickGrid {
         duration: Double,
         hop: Int,
         sampleRate: Int,
+        rawBpm: Double = seedBpm,
     ): GridChoice {
         val hopSec = hop.toDouble() / sampleRate.coerceAtLeast(1)
         val times = infos.map { it.timeSec }.toDoubleArray()
@@ -365,21 +391,38 @@ object KickGrid {
             }
         }
         addFamily(seedBpm)
+        addFamily(rawBpm)
         ioiBpm(times)?.let { addFamily(it) }
         ioiBpm(strongKickOnsets(infos).map { it.timeSec }.toDoubleArray())?.let { addFamily(it) }
 
         val scoredOnsets = strongKickOnsets(infos).ifEmpty { infos }
+        val onsetTimes = scoredOnsets.map { it.timeSec }.toDoubleArray()
         var bestBpm = seedBpm
         var bestPhase = 0.0
         var bestScore = Double.NEGATIVE_INFINITY
+        var bestOccupancy = 0.0
         var bestCandidates: List<PhaseCandidate> = emptyList()
         for (bpm in candidatesBpm) {
             val ranked = rankPhases(scoredOnsets, bpm, hopSec, energy, hop, sampleRate)
             val top = ranked.firstOrNull() ?: continue
-            val better = top.score > bestScore + 1e-4 ||
-                (abs(top.score - bestScore) <= 1e-4 && closerTempo(bpm, seedBpm, bestBpm))
+            val occupancy = kickMatchScore(
+                onsetTimes,
+                bpm,
+                top.phaseSec,
+                duration,
+                hop,
+                sampleRate,
+            )
+            val combined = top.score * (0.45 + 0.55 * occupancy)
+            val close = bestScore.isFinite() &&
+                abs(combined - bestScore) <= 0.10 * maxOf(abs(combined), abs(bestScore), 1.0)
+            val better = combined > bestScore + 1e-4 ||
+                (close && occupancy > bestOccupancy + 0.08) ||
+                (close && abs(occupancy - bestOccupancy) <= 0.08 && bpm < bestBpm - 0.2) ||
+                (abs(combined - bestScore) <= 1e-4 && closerTempo(bpm, seedBpm, bestBpm))
             if (better) {
-                bestScore = top.score
+                bestScore = combined
+                bestOccupancy = occupancy
                 bestBpm = bpm
                 bestPhase = top.phaseSec
                 bestCandidates = ranked
@@ -395,6 +438,25 @@ object KickGrid {
             return GridChoice(seedBpm, phase, emptyList())
         }
         return GridChoice(bestBpm, bestPhase, bestCandidates.take(8))
+    }
+
+    internal fun foldBalladGrid(
+        chosen: GridChoice,
+        infos: List<OnsetInfo>,
+        energy: FloatArray,
+        hop: Int,
+        sampleRate: Int,
+    ): GridChoice {
+        val folded = TempoMath.foldDoubleBallad(chosen.bpm)
+        if (abs(folded - chosen.bpm) <= 0.2) return chosen
+        val scored = strongKickOnsets(infos).ifEmpty { infos }
+        val hopSec = hop.toDouble() / sampleRate.coerceAtLeast(1)
+        val ranked = rankPhases(scored, folded, hopSec, energy, hop, sampleRate)
+        return GridChoice(
+            bpm = folded,
+            phaseSec = ranked.firstOrNull()?.phaseSec ?: chosen.phaseSec,
+            candidates = ranked.take(8),
+        )
     }
 
     internal fun rankPhases(
@@ -620,7 +682,7 @@ object KickGrid {
         val intervals = ArrayList<Double>(onsets.size)
         for (i in 1 until onsets.size) {
             val d = onsets[i] - onsets[i - 1]
-            if (d.isFinite() && d > 0.22 && d < 1.6) intervals.add(d)
+            if (d.isFinite() && d > 0.22 && d < 2.05) intervals.add(d)
         }
         if (intervals.size < 4) return null
         intervals.sort()

@@ -31,6 +31,8 @@ class TrackFileStore(private val context: Context) {
 
     fun stemWav(id: String, stem: StemId): File = File(stemsDir(id), stem.fileName)
 
+    fun mixWorkWav(id: String): File = File(trackDir(id), "mix44100.wav")
+
     fun vocalsWav(id: String): File = stemWav(id, StemId.VOCALS)
 
     fun drumsWav(id: String): File = stemWav(id, StemId.DRUMS)

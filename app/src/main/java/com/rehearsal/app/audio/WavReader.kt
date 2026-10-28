@@ -32,17 +32,27 @@ class MappedWav(
         }
     }
 
-    fun toStereoPcm(): StereoPcm {
-        val n = info.frameCount.coerceAtLeast(0)
+    fun toStereoPcm(): StereoPcm = readRange(0, info.frameCount)
+
+    fun readRange(startFrame: Int, frameCount: Int): StereoPcm {
+        val total = info.frameCount.coerceAtLeast(0)
+        val start = startFrame.coerceIn(0, total)
+        val n = frameCount.coerceAtMost(total - start).coerceAtLeast(0)
         val left = FloatArray(n)
         val right = FloatArray(n)
         val stride = (info.channels * info.bytesPerSample).coerceAtLeast(1)
         for (i in 0 until n) {
-            val base = i * stride
+            val base = (start + i) * stride
             left[i] = sampleAt(base)
             right[i] = if (info.channels > 1) sampleAt(base + info.bytesPerSample) else left[i]
         }
         return StereoPcm(info.sampleRate, left, right)
+    }
+
+    fun frameSample(frame: Int, channel: Int): Float {
+        val stride = (info.channels * info.bytesPerSample).coerceAtLeast(1)
+        val ch = channel.coerceIn(0, (info.channels - 1).coerceAtLeast(0))
+        return sampleAt(frame * stride + ch * info.bytesPerSample)
     }
 
     private fun sampleAt(index: Int): Float {
@@ -64,6 +74,24 @@ object WavReader {
         val mapped = openMapped(file)
         try {
             return mapped.toStereoPcm()
+        } finally {
+            mapped.close()
+        }
+    }
+
+    fun readStereoRange(file: File, startFrame: Int, frameCount: Int): StereoPcm {
+        val mapped = openMapped(file)
+        try {
+            return mapped.readRange(startFrame, frameCount)
+        } finally {
+            mapped.close()
+        }
+    }
+
+    fun frameCount(file: File): Int {
+        val mapped = openMapped(file)
+        try {
+            return mapped.info.frameCount
         } finally {
             mapped.close()
         }

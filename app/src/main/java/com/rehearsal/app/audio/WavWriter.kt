@@ -23,9 +23,13 @@ class WavWriter(
         writeHeader(0)
     }
 
-    fun writePlanarFloatStereo(left: FloatArray, right: FloatArray) {
+    fun writePlanarFloatStereo(
+        left: FloatArray,
+        right: FloatArray,
+        frames: Int = minOf(left.size, right.size),
+    ) {
         require(channels == 2)
-        val n = minOf(left.size, right.size)
+        val n = frames.coerceAtMost(minOf(left.size, right.size)).coerceAtLeast(0)
         val frame = 2048
         val bytes = ByteBuffer.allocate(frame * 8).order(ByteOrder.LITTLE_ENDIAN)
         var i = 0

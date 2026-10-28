@@ -78,7 +78,7 @@ class KickGridEarlyClickTest {
                 "errClick=${errClick * 1000}ms errBody=${errBody * 1000}ms",
             errClick <= hop + 0.020 && errClick < errBody,
         )
-        assertEquals(KickGrid.VERSION, 4)
+        assertEquals(KickGrid.VERSION, 8)
     }
 
     @Test
@@ -155,8 +155,12 @@ class KickGridEarlyClickTest {
             kickGridVersion = 3,
         )
         assertTrue(KickGrid.needsRefresh(stale))
-        assertEquals(4, KickGrid.VERSION)
-        assertTrue(!KickGrid.needsRefresh(stale.copy(kickGridVersion = 4)))
+        assertEquals(8, KickGrid.VERSION)
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 4)))
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 5)))
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 6)))
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 7)))
+        assertTrue(!KickGrid.needsRefresh(stale.copy(kickGridVersion = 8)))
     }
 
     companion object {

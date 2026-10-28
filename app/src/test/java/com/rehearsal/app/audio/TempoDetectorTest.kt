@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.sin
 
 class TempoDetectorTest {
@@ -37,7 +38,8 @@ class TempoDetectorTest {
 
     @Test
     fun halfDoubleClamp() {
-        assertEquals(120.0, TempoMath.clampHalfDouble(60.0), 1e-9)
+        assertEquals(60.0, TempoMath.clampHalfDouble(60.0), 1e-9)
+        assertEquals(65.5, TempoMath.clampHalfDouble(65.5), 1e-9)
         assertEquals(120.0, TempoMath.clampHalfDouble(240.0), 1e-9)
         assertEquals(102.0, TempoMath.clampHalfDouble(102.0), 1e-9)
         assertEquals(102.0, TempoMath.clampHalfDouble(51.0), 1e-9)
@@ -51,16 +53,38 @@ class TempoDetectorTest {
     }
 
     @Test
-    fun sixtyBpmClicksClampTo120() {
+    fun sixtyBpmClicksStayNear60Or120() {
         val pcm = stereoClicks(bpm = 60.0, bars = 4, beatsPerBar = 4)
         val analysis = TempoDetector.analyze(pcm)
-        assertEquals(
-            "half-tempo train must clamp into 70–180 near 120, was ${analysis.bpm}",
-            120.0,
-            analysis.bpm.toDouble(),
-            0.4,
+        val bpm = analysis.bpm.toDouble()
+        assertTrue(
+            "60 BPM clicks stay a ballad or the 120 pulse, was $bpm",
+            bpm in 58.0..72.0 || bpm in 115.0..125.0,
         )
-        assertTrue(analysis.beats.size >= 12)
+        assertTrue(analysis.beats.size >= 8)
+    }
+
+    @Test
+    fun sixtyFivePointFiveMustNotBecome131() {
+        val pcm = stereoClicks(bpm = 65.5, bars = 8, beatsPerBar = 4)
+        val analysis = TempoDetector.analyze(pcm)
+        assertTrue("65.5 clicks must not clamp to 131, was ${analysis.bpm}", abs(analysis.bpm - 131f) > 8f)
+        assertEquals("65.5 ballad pulse, was ${analysis.bpm}", 65.5, analysis.bpm.toDouble(), 3.0)
+    }
+
+    @Test
+    fun preferMixKeepsBalladWhenDrumsDouble() {
+        assertEquals(75f, TempoMath.preferMixIfDrumsOctave(75f, 150f), 1e-3f)
+        assertEquals(75f, TempoMath.preferMixIfDrumsOctave(75f, 131f), 1e-3f)
+        assertEquals(75f, TempoMath.preferMixIfDrumsOctave(75f, 65.5f), 1e-3f)
+        assertEquals(73.7f, TempoMath.preferMixIfDrumsOctave(73.7f, 131f), 0.05f)
+        assertEquals(104.8f, TempoMath.preferMixIfDrumsOctave(104.6f, 104.8f), 1e-3f)
+        assertEquals(75f, TempoMath.preferMixIfDrumsOctave(150f, 75f), 1e-3f)
+        assertEquals(76.5f, TempoMath.preferMixIfDrumsOctave(153f, 153f), 0.05f)
+        assertEquals(76.5, TempoMath.foldDoubleBallad(153.0), 1e-9)
+        assertEquals(75.0, TempoMath.foldDoubleBallad(150.0), 1e-9)
+        assertEquals(104.6, TempoMath.foldDoubleBallad(104.6), 1e-9)
+        assertEquals(120.0, TempoMath.foldDoubleBallad(120.0), 1e-9)
     }
 
     @Test

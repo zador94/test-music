@@ -8,8 +8,8 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * BPM + `beats[]` по 44.1 stereo PCM. Без librosa, без ONNX.
- * HT-Demucs не трогает: вызывается после decode, до/рядом с separate.
+ * BPM + `beats[]` по 44.1 stereo PCM через [TrackTempo] (порт beat-sense
+ * `tempoOfTrack`). HT-Demucs не трогает: после decode, до/рядом с separate.
  */
 object TempoDetector {
     const val SAMPLE_RATE = 44100
@@ -22,31 +22,17 @@ object TempoDetector {
         if (samples < sr / 2) {
             return TrackAnalysis.fallbackGrid(samples, sr)
         }
-        val novelty = novelty(pcm, HOP)
-        var peak = 0f
-        for (v in novelty) if (v > peak) peak = v
-        if (peak < 1e-8f) {
-            return TrackAnalysis.fallbackGrid(samples, sr)
-        }
-        val rawBpm = estimateBpm(novelty, HOP, sr)
-        val bpm = TempoMath.clampHalfDouble(rawBpm)
-        val first = trackBeats(novelty, bpm, duration, HOP, sr)
-        val refined = TempoMath.bpmFromBeats(first.first, bpm) ?: bpm
-        val (beats, offset) = if (abs(refined - bpm) > 0.05) {
-            trackBeats(novelty, refined, duration, HOP, sr)
-        } else {
-            first
-        }
-        val measured = TempoMath.bpmFromBeats(beats, refined) ?: refined
+        val tracked = TrackTempo.tempoOfTrack(pcm)
         return TrackAnalysis(
-            bpm = PlaybackMath.roundToTenth(measured.toFloat()),
-            beats = beats,
-            downbeatOffset = offset,
+            bpm = PlaybackMath.roundToTenth(tracked.bpm.toFloat()),
+            beats = tracked.beats,
+            downbeatOffset = tracked.phaseSec,
             timeSignature = intArrayOf(4, 4),
             duration = duration,
             sampleRate = sr,
             separator = SplitKind.HTDEMUCS_4STEM,
             stems = TrackAnalysis.DEFAULT_STEMS,
+            kickPhaseSec = tracked.phaseSec,
         )
     }
 
