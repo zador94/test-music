@@ -12,8 +12,8 @@ import kotlin.math.tanh
 
 /**
  * Клик в том же PCM, что музыка: [mixInto] **после** WSOLA.
- * Ровные четверти по [BeatClock] на original BPM (дробный);
- * фаза — kickPhase из ударных плюс калибровка, не `beats[]`.
+ * Ровные четверти: шаг = `periodSec` tempoOfTrack, начало = `phaseSec` микса
+ * плюс калибровка. Не `60 / bpm` после 0.1 и не KickGrid по drums.
  * Клик не растягивается; позиция доли — в выходных сэмплах.
  */
 class MetronomeClickEngine {
@@ -22,6 +22,8 @@ class MetronomeClickEngine {
     var kickPhaseUs: Long = 0L
         private set
     @Volatile var gridOriginUs: Long = 0L
+        private set
+    @Volatile var periodSec: Double = 0.0
         private set
     @Volatile var originalBpm: Float = DEFAULT_BPM
         set(value) {
@@ -68,8 +70,15 @@ class MetronomeClickEngine {
         click.size.toLong() * 1_000_000L / sampleRate.coerceAtLeast(1)
 
     fun setAnalysis(analysis: TrackAnalysis?) {
-        kickPhaseUs = TempoMath.secondsToMediaUs(analysis?.kickPhaseSec ?: 0.0)
+        periodSec = analysis?.periodSec ?: 0.0
+        val phase = analysis?.clickPhaseSec() ?: 0.0
+        kickPhaseUs = TempoMath.secondsToMediaUs(phase)
         refreshGridOrigin()
+    }
+
+    fun clickIntervalUs(): Long {
+        if (periodSec > 1e-9) return BeatClock.intervalFromPeriodSec(periodSec)
+        return BeatClock.intervalUs(originalBpm)
     }
 
     fun setGridOriginUs(originUs: Long) {
@@ -80,7 +89,7 @@ class MetronomeClickEngine {
         gridOriginUs = BeatClock.gridOriginUs(
             kickPhaseUs,
             calibrationUs,
-            BeatClock.intervalUs(originalBpm),
+            clickIntervalUs(),
         )
     }
 
@@ -145,7 +154,7 @@ class MetronomeClickEngine {
             startUs,
             endUs,
             clickMediaUs,
-            BeatClock.intervalUs(bpm),
+            clickIntervalUs(),
             gridOriginUs,
             fromExclusiveUs,
         )

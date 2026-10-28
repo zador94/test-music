@@ -7,13 +7,19 @@ import kotlin.math.roundToLong
 import kotlin.math.sin
 
 /**
- * Сетка долей в **media time**. Шаг = 60/originalBpm (дробный, не `toInt`).
- * Фаза — kickPhase из ударных плюс ручная калибровка, не `beats[]`.
+ * Сетка долей в **media time**. Шаг клика = [intervalFromPeriodSec],
+ * не `60 / bpm` после округления до 0.1. [intervalUs] — запасной путь
+ * без `periodSec` в JSON.
  */
 object BeatClock {
     fun intervalUs(originalBpm: Float): Long {
         if (originalBpm <= 0f) return Long.MAX_VALUE
         return (60_000_000.0 / originalBpm.toDouble()).roundToLong().coerceAtLeast(1L)
+    }
+
+    fun intervalFromPeriodSec(periodSec: Double): Long {
+        if (!periodSec.isFinite() || periodSec <= 0.0) return Long.MAX_VALUE
+        return (periodSec * 1_000_000.0).roundToLong().coerceAtLeast(1L)
     }
 
     /** origin = (фаза бочки + калибровка) mod период. Калибровка может быть отрицательной. */

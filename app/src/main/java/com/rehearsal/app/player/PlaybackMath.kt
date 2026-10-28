@@ -93,8 +93,8 @@ object PlaybackMath {
     }
 
     /**
-     * Сетка и поле оригинала: одно десятичное, не `toInt`.
-     * 104.6 при подписи «105» плывёт вдоль песни.
+     * Подпись и поле оригинала: одно десятичное, не `toInt`.
+     * Шаг клика — `periodSec` из analysis.json, не `60 /` это значение.
      */
     fun committedOriginalBpm(originalBpm: Float): Float {
         if (!originalBpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM

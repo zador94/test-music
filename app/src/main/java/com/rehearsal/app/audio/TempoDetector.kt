@@ -8,8 +8,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * BPM + `beats[]` по 44.1 stereo PCM через [TrackTempo] (порт beat-sense
- * `tempoOfTrack`). HT-Demucs не трогает: после decode, до/рядом с separate.
+ * BPM (подпись 0.1) + `periodSec`/`phaseSec` клика по 44.1 stereo PCM через
+ * [TrackTempo] (`tempoOfTrack` по миксу). KickGrid сюда не пишет.
+ * HT-Demucs не трогает: после decode, до/рядом с separate.
  */
 object TempoDetector {
     const val SAMPLE_RATE = 44100
@@ -23,16 +24,20 @@ object TempoDetector {
             return TrackAnalysis.fallbackGrid(samples, sr)
         }
         val tracked = TrackTempo.tempoOfTrack(pcm)
+        val period = tracked.periodSec
+        val phase = tracked.phaseSec
         return TrackAnalysis(
             bpm = PlaybackMath.roundToTenth(tracked.bpm.toFloat()),
             beats = tracked.beats,
-            downbeatOffset = tracked.phaseSec,
+            downbeatOffset = phase,
             timeSignature = intArrayOf(4, 4),
             duration = duration,
             sampleRate = sr,
             separator = SplitKind.HTDEMUCS_4STEM,
             stems = TrackAnalysis.DEFAULT_STEMS,
-            kickPhaseSec = tracked.phaseSec,
+            kickPhaseSec = phase,
+            periodSec = period,
+            phaseSec = phase,
         )
     }
 

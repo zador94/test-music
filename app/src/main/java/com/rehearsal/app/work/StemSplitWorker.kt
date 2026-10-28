@@ -19,7 +19,6 @@ import com.rehearsal.app.audio.AudioBuffers
 import com.rehearsal.app.audio.DemucsChunkPlan
 import com.rehearsal.app.audio.HtDemucs
 import com.rehearsal.app.audio.HtdemucsModelStore
-import com.rehearsal.app.audio.KickGrid
 import com.rehearsal.app.audio.MinChunkOomException
 import com.rehearsal.app.audio.TempoDetector
 import com.rehearsal.app.audio.TrackAnalysis
@@ -99,9 +98,6 @@ class StemSplitWorker(
 
             report(28, "HT-Demucs окна 7.8 с, overlap-add на диск")
             splitMixStreaming(mixWav, model, stemFiles)
-
-            report(96, "Сетка по бочке")
-            refineKickGridFromDrumsFile(dao, files, trackId, stemFiles.getValue(StemId.DRUMS))
 
             val note =
                 "HT-Demucs (htdemucs) ONNX, 4 стемы, WAV IEEE float32. Окна модели 7.8 с, " +
@@ -198,26 +194,6 @@ class StemSplitWorker(
         }
         files.writeAnalysis(trackId, analysis)
         dao.updateBpm(trackId, analysis.bpm, System.currentTimeMillis())
-        dao.getById(trackId)?.let { files.writeMeta(it) }
-    }
-
-    private suspend fun refineKickGridFromDrumsFile(
-        dao: TrackDao,
-        files: TrackFileStore,
-        trackId: String,
-        drumsFile: File,
-    ) {
-        val drums = try {
-            WavReader.readStereo(drumsFile)
-        } catch (_: OutOfMemoryError) {
-            return
-        }
-        val file = files.analysisJson(trackId)
-        val existing = TrackAnalysis.fromFile(file)
-            ?: TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate)
-        val refined = KickGrid.refine(existing, drums)
-        files.writeAnalysis(trackId, refined)
-        dao.updateBpm(trackId, refined.bpm, System.currentTimeMillis())
         dao.getById(trackId)?.let { files.writeMeta(it) }
     }
 

@@ -13,8 +13,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * BPM (0.1) и фаза сетки по **stem ударных**, не по mix и не по `beats[]`.
- * Онсет — начало низкой энергии / HF-щелчок. Фаза — четверти, не синкопа 16-й.
+ * Разбор ударных (онсет / HF-щелчок). Плеер **не** берёт отсюда BPM и фазу клика:
+ * `analysis.json` пишет [TempoDetector] / [TrackTempo] (`periodSec`, `phaseSec`).
  */
 object KickGrid {
     const val VERSION = 8
@@ -184,6 +184,7 @@ object KickGrid {
         )
     }
 
+    /** Только разбор drums. Не вызывать с пути плеера / StemSplitWorker / кнопки. */
     fun refine(existing: TrackAnalysis, drums: StereoPcm): TrackAnalysis {
         val result = try {
             analyze(drums)

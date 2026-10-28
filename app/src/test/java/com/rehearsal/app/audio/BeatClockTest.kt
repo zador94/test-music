@@ -10,6 +10,13 @@ class BeatClockTest {
         assertEquals(500_000L, BeatClock.intervalUs(120f))
         assertEquals(1_000_000L, BeatClock.intervalUs(60f))
         assertEquals(333_333L, BeatClock.intervalUs(180f))
+        assertEquals(500_000L, BeatClock.intervalFromPeriodSec(0.5))
+        val exact = 60.0 / 104.64
+        assertEquals(
+            kotlin.math.round(exact * 1_000_000.0).toLong(),
+            BeatClock.intervalFromPeriodSec(exact),
+        )
+        assertTrue(BeatClock.intervalFromPeriodSec(exact) != BeatClock.intervalUs(104.6f))
     }
 
     @Test

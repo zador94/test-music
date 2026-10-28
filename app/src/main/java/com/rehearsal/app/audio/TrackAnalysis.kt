@@ -20,7 +20,22 @@ data class TrackAnalysis(
     val stems: List<String> = DEFAULT_STEMS,
     val kickPhaseSec: Double = 0.0,
     val kickGridVersion: Int = 0,
+    /** Точный период tempoOfTrack. Шаг клика, не `60 / bpm` после округления до 0.1. */
+    val periodSec: Double = 0.0,
+    /** Фаза микса tempoOfTrack. Начало сетки клика, не KickGrid по drums. */
+    val phaseSec: Double = kickPhaseSec,
 ) {
+    fun hasClickPeriod(): Boolean = periodSec.isFinite() && periodSec > 1e-9
+
+    fun clickPeriodSec(): Double {
+        if (hasClickPeriod()) return periodSec
+        val b = bpm.toDouble()
+        if (b.isFinite() && b > 0.0) return 60.0 / b
+        return 60.0 / MetronomeClickEngine.DEFAULT_BPM
+    }
+
+    fun clickPhaseSec(): Double = if (phaseSec.isFinite()) phaseSec else kickPhaseSec
+
     fun beatTimesUs(): LongArray {
         val out = LongArray(beats.size) { i ->
             TempoMath.secondsToMediaUs(beats[i])
@@ -41,7 +56,9 @@ data class TrackAnalysis(
         return buildString {
             appendLine("{")
             appendLine("  \"bpm\": ${formatNum(bpm.toDouble())},")
-            appendLine("  \"kickPhaseSec\": ${formatNum(kickPhaseSec)},")
+            appendLine("  \"periodSec\": ${formatNum(periodSec, 12)},")
+            appendLine("  \"phaseSec\": ${formatNum(clickPhaseSec(), 12)},")
+            appendLine("  \"kickPhaseSec\": ${formatNum(clickPhaseSec(), 12)},")
             appendLine("  \"kickGridVersion\": $kickGridVersion,")
             append("  \"beats\": [")
             if (beatsBody.isNotEmpty()) {
@@ -81,6 +98,9 @@ data class TrackAnalysis(
                 downbeatOffset = beats.firstOrNull() ?: 0.0,
                 duration = duration,
                 sampleRate = sr,
+                kickPhaseSec = 0.0,
+                periodSec = period,
+                phaseSec = 0.0,
             )
         }
 
@@ -110,6 +130,8 @@ data class TrackAnalysis(
                 val separator = extractString(text, "separator") ?: SplitKind.HTDEMUCS_4STEM
                 val stems = extractStringArray(text, "stems").ifEmpty { DEFAULT_STEMS }
                 val kickPhase = extractNumber(text, "kickPhaseSec") ?: 0.0
+                val phase = extractNumber(text, "phaseSec") ?: kickPhase
+                val period = extractNumber(text, "periodSec") ?: 0.0
                 val kickGridVersion = extractNumber(text, "kickGridVersion")
                     ?.roundToLong()
                     ?.toInt()
@@ -123,17 +145,19 @@ data class TrackAnalysis(
                     sampleRate = sampleRate,
                     separator = separator,
                     stems = stems,
-                    kickPhaseSec = kickPhase,
+                    kickPhaseSec = phase,
                     kickGridVersion = kickGridVersion,
+                    periodSec = period,
+                    phaseSec = phase,
                 )
             } catch (_: Throwable) {
                 null
             }
         }
 
-        private fun formatNum(value: Double): String {
+        private fun formatNum(value: Double, decimals: Int = 6): String {
             if (!value.isFinite()) return "0"
-            val formatted = String.format(Locale.US, "%.6f", value)
+            val formatted = String.format(Locale.US, "%.${decimals}f", value)
             return formatted.trimEnd('0').trimEnd('.')
         }
 

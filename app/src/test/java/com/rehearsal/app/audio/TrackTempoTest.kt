@@ -47,8 +47,11 @@ class TrackTempoTest {
     fun funkOneOhFourPointSixIsNot210() {
         val pcm = KickFunkGridTest.funkGroove(bpm = 104.6, phaseSec = 0.08, bars = 8)
         val mix = TempoDetector.analyze(pcm)
+        val tracked = TrackTempo.tempoOfTrack(pcm)
         assertEquals("funk mix, was ${mix.bpm}", 104.6, mix.bpm.toDouble(), 3.0)
         assertTrue("funk must not be 210, was ${mix.bpm}", abs(mix.bpm - 210f) > 20f)
+        assertEquals(tracked.periodSec, mix.periodSec, 1e-9)
+        assertEquals(tracked.phaseSec, mix.phaseSec, 1e-6)
     }
 
     @Test
