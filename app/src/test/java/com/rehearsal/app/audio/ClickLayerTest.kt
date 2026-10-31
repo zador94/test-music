@@ -76,11 +76,10 @@ class ClickLayerTest {
     }
 
     @Test
-    fun timeUnsetPlayheadStillClicks() {
+    fun timeUnsetPlayheadDoesNotPaintZeroGrid() {
         val engine = engine()
         val out = layer(engine, silence(2048), C.TIME_UNSET)
-        assertFalse(isSilent(out))
-        assertTrue(peak(out) > 0.85)
+        assertTrue("TIME_UNSET is not t=0; do not paint the start grid", isSilent(out))
     }
 
     @Test

@@ -245,8 +245,9 @@ class PlayerViewModel(
         val analysis = app.repository.refreshKickGrid(trackId, force) ?: return
         playback.applyKickGrid(analysis)
         if (userOverrodeOriginalBpm) return
-        val bpm = analysis.bpm
-        val current = _ui.value.originalBpm
+        val bpm = PlaybackMath.committedOriginalBpm(analysis.bpm)
+        val current = playback.originalBpm
+        if (!force && abs(bpm - current) <= 0.05f) return
         val followMetronome = abs(_ui.value.metronomeBpm - current) < 0.51f
         playback.setOriginalBpm(bpm)
         if (followMetronome) playback.setMetronomeBpm(bpm)

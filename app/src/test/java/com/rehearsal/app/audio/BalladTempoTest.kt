@@ -69,9 +69,10 @@ class BalladTempoTest {
         assertTrue("77.1 kick was ${grid.bpm}", abs(grid.bpm - 156f) > 8f)
         assertEquals("77.1 mix, was ${mix.bpm}", 77.1, mix.bpm.toDouble(), 3.0)
         assertEquals("77.1 kick, was ${grid.bpm}", 77.1, grid.bpm.toDouble(), 4.0)
-        val folded = KickGrid.refine(mix.copy(bpm = 156.6f), pcm)
-        assertTrue("refine 156 must fold, was ${folded.bpm}", abs(folded.bpm - 156f) > 8f)
-        assertEquals("refine folded, was ${folded.bpm}", 77.1, folded.bpm.toDouble(), 4.0)
+        val locked = mix.copy(bpm = 156.6f)
+        val folded = KickGrid.refine(locked, pcm)
+        assertEquals("drums must not fold 156→75", 156.6f, folded.bpm, 0.01f)
+        assertEquals(mix.periodSec, folded.periodSec, 1e-12)
     }
 
     @Test
@@ -84,8 +85,8 @@ class BalladTempoTest {
         assertEquals("76.5 mix, was ${mix.bpm}", 76.5, mix.bpm.toDouble(), 8.0)
         assertEquals("76.5 kick, was ${grid.bpm}", 76.5, grid.bpm.toDouble(), 8.0)
         val refined = KickGrid.refine(mix.copy(bpm = 153f), pcm)
-        assertTrue("refine 153/153 must fold, was ${refined.bpm}", abs(refined.bpm - 153f) > 4f)
-        assertEquals("refine folded, was ${refined.bpm}", 76.5, refined.bpm.toDouble(), 8.0)
+        assertEquals("drums must not fold 153→76.5", 153f, refined.bpm, 0.01f)
+        assertEquals(mix.periodSec, refined.periodSec, 1e-12)
     }
 
     @Test

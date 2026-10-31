@@ -19,6 +19,7 @@ import com.rehearsal.app.audio.AudioBuffers
 import com.rehearsal.app.audio.DemucsChunkPlan
 import com.rehearsal.app.audio.HtDemucs
 import com.rehearsal.app.audio.HtdemucsModelStore
+import com.rehearsal.app.audio.DrumPhase
 import com.rehearsal.app.audio.MinChunkOomException
 import com.rehearsal.app.audio.TempoDetector
 import com.rehearsal.app.audio.TrackAnalysis
@@ -98,6 +99,15 @@ class StemSplitWorker(
 
             report(28, "HT-Demucs окна 7.8 с, overlap-add на диск")
             splitMixStreaming(mixWav, model, stemFiles)
+
+            report(96, "Фаза бочки в периоде микса")
+            alignKickPhaseFromDrumsFile(
+                dao,
+                files,
+                trackId,
+                stemFiles.getValue(StemId.DRUMS),
+                mixWav,
+            )
 
             val note =
                 "HT-Demucs (htdemucs) ONNX, 4 стемы, WAV IEEE float32. Окна модели 7.8 с, " +
@@ -194,6 +204,35 @@ class StemSplitWorker(
         }
         files.writeAnalysis(trackId, analysis)
         dao.updateBpm(trackId, analysis.bpm, System.currentTimeMillis())
+        dao.getById(trackId)?.let { files.writeMeta(it) }
+    }
+
+    private suspend fun alignKickPhaseFromDrumsFile(
+        dao: TrackDao,
+        files: TrackFileStore,
+        trackId: String,
+        drumsFile: File,
+        mixWav: File,
+    ) {
+        val drums = try {
+            WavReader.readStereo(drumsFile)
+        } catch (_: OutOfMemoryError) {
+            return
+        } catch (_: Throwable) {
+            return
+        }
+        val mix = try {
+            if (mixWav.isFile) WavReader.readStereo(mixWav) else null
+        } catch (_: OutOfMemoryError) {
+            null
+        } catch (_: Throwable) {
+            null
+        }
+        val file = files.analysisJson(trackId)
+        val existing = TrackAnalysis.fromFile(file) ?: return
+        val aligned = DrumPhase.align(existing, drums, mix)
+        files.writeAnalysis(trackId, aligned)
+        dao.updateBpm(trackId, aligned.bpm, System.currentTimeMillis())
         dao.getById(trackId)?.let { files.writeMeta(it) }
     }
 

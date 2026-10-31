@@ -21,18 +21,20 @@ class ClickCalibrationTest {
         assertEquals(-150_000L, ClickCalibration.toUs(-150))
         assertEquals(-180_000L, ClickCalibration.toUs(-180))
         assertEquals(-500_000L, ClickCalibration.toUs(-500))
-        assertEquals(-180, ClickCalibration.DEFAULT_MS)
-        assertEquals("click_shift_ms_v28", ClickCalibration.KEY_SHIFT_MS)
+        assertEquals(0, ClickCalibration.DEFAULT_MS)
+        assertEquals("click_shift_ms_v37", ClickCalibration.KEY_SHIFT_MS)
         assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS)
         assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS_V21)
+        assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS_V28)
         assertEquals(199, ClickCalibration.sliderSteps())
     }
 
     @Test
-    fun missingCurrentKeyUsesDeviceDefaultNotLegacy() {
-        assertEquals(-180, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = 0))
-        assertEquals(-180, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = -170))
-        assertEquals(-180, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = 40))
+    fun missingCurrentKeyUsesZeroNotLegacyMinus180() {
+        assertEquals(0, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = 0))
+        assertEquals(0, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = -180))
+        assertEquals(0, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = -170))
+        assertEquals(0, ClickCalibration.resolveStoredMs(hasCurrentKey = false, currentValue = 40))
         assertEquals(-80, ClickCalibration.resolveStoredMs(hasCurrentKey = true, currentValue = -80))
         assertEquals(-180, ClickCalibration.resolveStoredMs(hasCurrentKey = true, currentValue = -180))
         assertEquals(-500, ClickCalibration.resolveStoredMs(hasCurrentKey = true, currentValue = -900))

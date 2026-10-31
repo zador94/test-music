@@ -187,9 +187,9 @@ class ClickInMixTest {
                 .build(),
         )
         val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
-        assertTrue(drain(pipe, silence(2048), C.TIME_UNSET, sink))
+        assertTrue(drain(pipe, silence(2048), 0L, sink))
         val submitted = sink.lastSubmittedAsBuffer()
-        assertFalse("TIME_UNSET + AAC mime still submits click PCM", isSilent(submitted))
+        assertFalse("AAC mime still submits click PCM", isSilent(submitted))
         assertTrue(peak(submitted) > 0.5)
     }
 

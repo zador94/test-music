@@ -6,8 +6,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.cos
-import kotlin.math.roundToInt
-import kotlin.math.sqrt
 
 /**
  * Свой WSOLA на **всех** скоростях; AudioTrack всегда 1×.
@@ -146,7 +144,7 @@ object SpeedStretch {
     ): ByteBuffer {
         val input = readPcm16(source, inFrames, channels)
         val floats = FloatArray(input.size) { input[it].toFloat() }
-        val stretched = wsola(floats, inFrames, outFrames, channels, stretch)
+        val stretched = wsola(floats, inFrames, outFrames, channels)
         val output = ShortArray(stretched.size) { i ->
             stretched[i].toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         }
@@ -162,7 +160,7 @@ object SpeedStretch {
         channels: Int,
     ): ByteBuffer {
         val input = readFloat(source, inFrames, channels)
-        val stretched = wsola(input, inFrames, outFrames, channels, stretch)
+        val stretched = wsola(input, inFrames, outFrames, channels)
         for (i in stretched.indices) {
             stretched[i] = stretched[i].coerceIn(-1f, 1f)
         }
@@ -178,80 +176,25 @@ object SpeedStretch {
         inFrames: Int,
         outFrames: Int,
         channels: Int,
-        stretch: Float,
     ): FloatArray {
         val acc = FloatArray(outFrames * channels)
         val win = grainWindow(inFrames)
         val hopOut = (win / 2).coerceAtLeast(1)
-        val hopIn = (hopOut * stretch.toDouble()).roundToInt().coerceAtLeast(1)
-        val search = hopOut.coerceAtLeast(1)
+        // Тот же коэффициент, что клик: outFrames/inFrames. Не hopOut×speed
+        // и не bestMatch по содержимому — иначе стемы плывут относительно клика.
+        val hopIn = ((hopOut.toLong() * inFrames) / outFrames.coerceAtLeast(1))
+            .toInt()
+            .coerceAtLeast(1)
         val window = hann(win)
         var desiredIn = 0
         var outPos = 0
-        var prevGrain = 0
         while (outPos < outFrames) {
-            val grainStart = if (outPos == 0) {
-                0
-            } else {
-                bestMatch(
-                    input,
-                    prevGrain,
-                    hopOut,
-                    desiredIn.coerceIn(0, (inFrames - 1).coerceAtLeast(0)),
-                    search,
-                    win,
-                    inFrames,
-                    channels,
-                )
-            }
+            val grainStart = if (outPos == 0) 0 else desiredIn.coerceIn(0, (inFrames - 1).coerceAtLeast(0))
             addGrain(input, acc, grainStart, outPos, win, inFrames, outFrames, channels, window)
-            prevGrain = grainStart
             outPos += hopOut
             desiredIn += hopIn
         }
         return acc
-    }
-
-    private fun bestMatch(
-        input: FloatArray,
-        prevGrain: Int,
-        hopOut: Int,
-        desiredIn: Int,
-        search: Int,
-        win: Int,
-        inFrames: Int,
-        channels: Int,
-    ): Int {
-        val lastStart = (inFrames - win).coerceAtLeast(0)
-        val lo = (desiredIn - search).coerceAtLeast(0)
-        val hi = (desiredIn + search).coerceAtMost(lastStart)
-        if (hi < lo) return desiredIn.coerceIn(0, lastStart)
-        val overlap = hopOut.coerceAtMost(win)
-        val ref = prevGrain + hopOut
-        if (ref >= inFrames) return desiredIn.coerceIn(lo, hi)
-        var best = desiredIn.coerceIn(lo, hi)
-        var bestCorr = Double.NEGATIVE_INFINITY
-        for (cand in lo..hi) {
-            val n = minOf(overlap, inFrames - ref, inFrames - cand)
-            if (n < 8) continue
-            var dot = 0.0
-            var n1 = 0.0
-            var n2 = 0.0
-            for (i in 0 until n) {
-                val a = input[(ref + i) * channels].toDouble()
-                val b = input[(cand + i) * channels].toDouble()
-                dot += a * b
-                n1 += a * a
-                n2 += b * b
-            }
-            val denom = sqrt(n1 * n2)
-            val corr = if (denom < 1.0) 0.0 else dot / denom
-            if (corr > bestCorr) {
-                bestCorr = corr
-                best = cand
-            }
-        }
-        return best
     }
 
     private fun addGrain(

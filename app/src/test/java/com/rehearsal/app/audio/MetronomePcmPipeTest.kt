@@ -170,16 +170,22 @@ class MetronomePcmPipeTest {
     }
 
     @Test
-    fun timeUnsetStillMixesClickEnergy() {
+    fun timeUnsetAfterFlushDoesNotPaintZeroGrid() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
         val pipe = MetronomePcmPipe(engine)
         pipe.configure(pcm16Format())
         val sink = IdentityAudioSink(bytesPerAccept = Int.MAX_VALUE)
-        assertTrue(drain(pipe, sinePcm16(1024), C.TIME_UNSET, sink))
+        assertTrue(drain(pipe, sinePcm16(1024), 0L, sink))
+        pipe.flush()
+        sink.submitted.clear()
+        val quiet = silence(1024)
+        assertTrue(drain(pipe, quiet, C.TIME_UNSET, sink))
         val submitted = sink.lastSubmittedAsBuffer()
-        assertFalse("TIME_UNSET still mixes click into sink PCM", isAllZeros(submitted))
-        assertTrue(peak(submitted) > 0.5)
+        assertTrue(
+            "TIME_UNSET after flush must not paint the t=0 click onto mid-song PCM",
+            isAllZeros(submitted) || peak(submitted) < 0.05,
+        )
     }
 
     @Test
@@ -300,6 +306,13 @@ class MetronomePcmPipeTest {
         out.position(0)
         out.limit(frames * 4)
         return out
+    }
+
+    private fun silence(frames: Int): ByteBuffer {
+        val buf = ByteBuffer.allocateDirect(frames * 4).order(ByteOrder.nativeOrder())
+        buf.limit(frames * 4)
+        buf.position(0)
+        return buf
     }
 
     private fun sinePcm16(frames: Int): ByteBuffer {

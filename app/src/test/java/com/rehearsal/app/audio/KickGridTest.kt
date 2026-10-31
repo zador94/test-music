@@ -107,6 +107,7 @@ class KickGridTest {
     @Test
     fun refineStampsCurrentKickGridVersion() {
         val pcm = lowBandKicks(bpm = 104.6, phaseSec = 0.08, bars = 4, beatsPerBar = 4)
+        val period = 60.0 / 104.6
         val stale = TrackAnalysis(
             bpm = 120f,
             beats = DoubleArray(0),
@@ -115,14 +116,19 @@ class KickGridTest {
             sampleRate = pcm.sampleRate,
             kickPhaseSec = 0.4,
             kickGridVersion = 0,
+            periodSec = period,
+            phaseSec = 0.4,
         )
         val refined = KickGrid.refine(stale, pcm)
         assertEquals(KickGrid.VERSION, refined.kickGridVersion)
         assertTrue(!KickGrid.needsRefresh(refined))
+        assertEquals("drums must not pick BPM", 120f, refined.bpm, 1e-3f)
+        assertEquals(period, refined.periodSec, 1e-12)
         assertTrue(
             "refine must rewrite late phase, was ${refined.kickPhaseSec}",
             kotlin.math.abs(refined.kickPhaseSec - 0.08) < 0.03,
         )
+        assertEquals(refined.phaseSec, refined.kickPhaseSec, 1e-12)
     }
 
     companion object {

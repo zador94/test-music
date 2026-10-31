@@ -13,11 +13,11 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Разбор ударных (онсет / HF-щелчок). Плеер **не** берёт отсюда BPM и фазу клика:
- * `analysis.json` пишет [TempoDetector] / [TrackTempo] (`periodSec`, `phaseSec`).
+ * Разбор ударных. BPM и `periodSec` клика — [TrackTempo] по миксу.
+ * Сюда — только фаза бочки **в уже готовом периоде**.
  */
 object KickGrid {
-    const val VERSION = 8
+    const val VERSION = 12
     const val HOP = TempoDetector.HOP
     const val LOWPASS_HZ = 150.0
     const val MID_LOW_HZ = 100.0
@@ -110,26 +110,49 @@ object KickGrid {
     fun needsRefresh(analysis: TrackAnalysis?): Boolean =
         analysis == null || analysis.kickGridVersion < VERSION
 
-    fun analyze(drums: StereoPcm): Result {
+    private class DrumOnsets(
+        val sampleRate: Int,
+        val duration: Double,
+        val energy: FloatArray,
+        val flux: FloatArray,
+        val hf: FloatArray,
+        val high: FloatArray,
+        val onsets: DoubleArray,
+        val infos: List<OnsetInfo>,
+    )
+
+    private fun collectOnsets(drums: StereoPcm): DrumOnsets? {
         val sr = drums.sampleRate.coerceAtLeast(1)
         val samples = drums.samples
         val duration = samples.toDouble() / sr
-        if (samples < sr / 2) {
-            return Result(MetronomeClickEngine.DEFAULT_BPM, 0.0, DoubleArray(0))
-        }
+        if (samples < sr / 2) return null
         val energy = lowBandEnergy(drums, HOP, LOWPASS_HZ)
         var peak = 0f
         for (v in energy) if (v > peak) peak = v
-        if (peak < 1e-8f) {
-            return Result(MetronomeClickEngine.DEFAULT_BPM, 0.0, DoubleArray(0))
-        }
+        if (peak < 1e-8f) return null
         val flux = fluxOf(energy)
         val mid = bandEnergy(drums, HOP, MID_LOW_HZ, MID_HIGH_HZ)
         val hf = TempoDetector.novelty(drums, HOP)
         val high = highpassEnergy(drums, HOP, LOWPASS_HZ)
         val onsets = pickEnergyOnsets(energy, flux, hf, HOP, sr, duration)
         val infos = describeOnsets(onsets, energy, flux, mid, HOP, sr)
-        val rawBpm = TempoDetector.estimateBpm(flux, HOP, sr)
+        return DrumOnsets(sr, duration, energy, flux, hf, high, onsets, infos)
+    }
+
+    fun analyze(drums: StereoPcm): Result {
+        val bundle = collectOnsets(drums) ?: return Result(
+            MetronomeClickEngine.DEFAULT_BPM,
+            0.0,
+            DoubleArray(0),
+        )
+        val sr = bundle.sampleRate
+        val duration = bundle.duration
+        val energy = bundle.energy
+        val onsets = bundle.onsets
+        val infos = bundle.infos
+        val hf = bundle.hf
+        val high = bundle.high
+        val rawBpm = TempoDetector.estimateBpm(bundle.flux, HOP, sr)
         val seed = TempoMath.foldDoubleBallad(TempoMath.clampHalfDouble(rawBpm))
         val chosen = foldBalladGrid(
             chooseGrid(infos, energy, seed, duration, HOP, sr, rawBpm),
@@ -184,38 +207,21 @@ object KickGrid {
         )
     }
 
-    /** Только разбор drums. Не вызывать с пути плеера / StemSplitWorker / кнопки. */
-    fun refine(existing: TrackAnalysis, drums: StereoPcm): TrackAnalysis {
-        val result = try {
-            analyze(drums)
-        } catch (_: Throwable) {
-            return existing
-        }
-        // Фаза — по бочке. BPM файла не удваиваем, если drums — октава / 8/9.
-        // Иначе (fallback 120 vs реальные 104.6) берём сетку KickGrid.
-        val fileBpm = TempoMath.foldDoubleBallad(existing.bpm.toDouble())
-        val drumsBpm = result.bpm.toDouble()
-        val resolved = when {
-            !fileBpm.isFinite() || fileBpm <= 0.0 -> drumsBpm
-            TempoMath.isOctaveFamily(fileBpm, drumsBpm) -> fileBpm
-            TempoMath.relativeClose(fileBpm, drumsBpm, 0.08) -> fileBpm
-            else -> drumsBpm
-        }
-        val bpm = PlaybackMath.roundToTenth(TempoMath.foldDoubleBallad(resolved).toFloat())
-        val phaseSec = if (TempoMath.relativeClose(bpm.toDouble(), result.bpm.toDouble(), 0.05)) {
-            result.kickPhaseSec
-        } else {
-            val infos = strongKickOnsets(result.onsetInfos).ifEmpty { result.onsetInfos }
-            val hopSec = hopSec(drums.sampleRate)
-            rankPhases(infos, bpm.toDouble(), hopSec, FloatArray(0), HOP, drums.sampleRate)
-                .firstOrNull()?.phaseSec ?: result.kickPhaseSec
-        }
-        return existing.copy(
-            bpm = bpm,
-            kickPhaseSec = phaseSec,
-            kickGridVersion = VERSION,
-        )
-    }
+    fun phaseInPeriod(drums: StereoPcm, periodSec: Double): Double =
+        DrumPhase.phaseInPeriod(drums, periodSec)
+
+    fun alignPhase(
+        existing: TrackAnalysis,
+        drums: StereoPcm,
+        mix: StereoPcm? = null,
+    ): TrackAnalysis = DrumPhase.align(existing, drums, mix)
+
+    /** Не путь плеера. Плеер зовёт [DrumPhase.align], не этот метод. */
+    fun refine(
+        existing: TrackAnalysis,
+        drums: StereoPcm,
+        mix: StereoPcm? = null,
+    ): TrackAnalysis = DrumPhase.align(existing, drums, mix)
 
     internal fun lowBandEnergy(pcm: StereoPcm, hop: Int, cutoffHz: Double): FloatArray {
         val n = pcm.samples

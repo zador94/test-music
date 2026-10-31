@@ -119,7 +119,7 @@ class KickGridTimebaseTest {
         val bpm = 104.6
         val phaseSec = 0.08
         val pcm = realisticGlissandoKicks(bpm = bpm, phaseSec = phaseSec, bars = 8)
-        val refined = refineFromWav(pcm)
+        val refined = refineFromWav(pcm, bpm)
         val period = 60.0 / bpm
         val errMs = wrappedMs(refined.kickPhaseSec - phaseSec, period)
         println(
@@ -138,7 +138,7 @@ class KickGridTimebaseTest {
         val bpm = 102.0
         val phaseSec = 0.08
         val pcm = realisticGlissandoKicks(bpm = bpm, phaseSec = phaseSec, bars = 8)
-        val refined = refineFromWav(pcm)
+        val refined = refineFromWav(pcm, bpm)
         val errMs = wrappedMs(refined.kickPhaseSec - phaseSec, 60.0 / bpm)
         println(
             "KickGridTimebase WAV-path Fonari-tempo bpm=${refined.bpm} " +
@@ -150,14 +150,19 @@ class KickGridTimebaseTest {
         )
     }
 
-    private fun refineFromWav(pcm: StereoPcm): TrackAnalysis {
+    private fun refineFromWav(pcm: StereoPcm, bpm: Double): TrackAnalysis {
         val file = File(tmp.newFolder(), "drums.wav")
         WavWriter(file, pcm.sampleRate, channels = 2).use { writer ->
             writer.writePlanarFloatStereo(pcm.left, pcm.right)
         }
         val drums = WavReader.readStereo(file)
-        val seed = TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate)
-            .copy(kickGridVersion = 0)
+        val period = 60.0 / bpm
+        val seed = TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate).copy(
+            bpm = bpm.toFloat(),
+            kickGridVersion = 0,
+            periodSec = period,
+            phaseSec = 0.0,
+        )
         return KickGrid.refine(seed, drums)
     }
 

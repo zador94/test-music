@@ -4,6 +4,9 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.rehearsal.app.audio.AudioBuffers
+import com.rehearsal.app.audio.DrumPhase
+import com.rehearsal.app.audio.KickGrid
+import com.rehearsal.app.audio.StereoPcm
 import com.rehearsal.app.audio.TempoDetector
 import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.audio.WavReader
@@ -36,8 +39,9 @@ class TrackRepository(
     suspend fun get(id: String): TrackEntity? = dao.getById(id)
 
     /**
-     * Пересчёт сетки клика: `tempoOfTrack` по миксу (исходник → 44.1), не KickGrid по drums.
-     * [force] — кнопка «Пересчитать темп и фазу»; иначе только если в JSON нет `periodSec`.
+     * Сетка клика: `tempoOfTrack` по миксу (period/BPM), затем фаза: атака микса,
+     * если тело drums стабильно позже, иначе бочка стема. [force] — кнопка;
+     * иначе если нет `periodSec` или устарел KickGrid.
      */
     suspend fun refreshKickGrid(id: String, force: Boolean = false): TrackAnalysis? {
         val mutex = synchronized(kickGridLocks) { kickGridLocks.getOrPut(id) { Mutex() } }
@@ -45,19 +49,40 @@ class TrackRepository(
             withContext(Dispatchers.IO) {
                 val track = dao.getById(id) ?: return@withContext null
                 val existing = TrackAnalysis.fromFile(files.analysisJson(id))
-                if (!force && existing != null && existing.hasClickPeriod()) return@withContext existing
-                val original = File(track.originalPath)
-                if (!original.isFile) return@withContext existing
+                if (!force && existing != null && existing.hasClickPeriod() &&
+                    !KickGrid.needsRefresh(existing)
+                ) {
+                    return@withContext existing
+                }
                 _kickGridBusy.update { it + id }
                 val mixWav = files.mixWorkWav(id)
                 try {
-                    AudioBuffers.decodeToWav44100(original, mixWav)
-                    val mix = WavReader.readStereo(mixWav)
-                    val analyzed = TempoDetector.analyze(mix)
-                    files.writeAnalysis(id, analyzed)
-                    dao.updateBpm(id, analyzed.bpm, System.currentTimeMillis())
+                    var analyzed = existing
+                    val rerunTempo = force || analyzed == null || !analyzed.hasClickPeriod()
+                    val original = File(track.originalPath)
+                    var mixPcm: StereoPcm? = null
+                    if (rerunTempo) {
+                        if (!original.isFile) return@withContext existing
+                        AudioBuffers.decodeToWav44100(original, mixWav)
+                        mixPcm = WavReader.readStereo(mixWav)
+                        analyzed = TempoDetector.analyze(mixPcm)
+                    }
+                    val current = analyzed ?: return@withContext existing
+                    val drumsPath = track.drumsPath
+                    val drumsFile = if (drumsPath.isNullOrBlank()) null else File(drumsPath)
+                    val stamped = if (drumsFile != null && drumsFile.isFile) {
+                        if (mixPcm == null && original.isFile) {
+                            AudioBuffers.decodeToWav44100(original, mixWav)
+                            mixPcm = WavReader.readStereo(mixWav)
+                        }
+                        DrumPhase.align(current, WavReader.readStereo(drumsFile), mixPcm)
+                    } else {
+                        current
+                    }
+                    files.writeAnalysis(id, stamped)
+                    dao.updateBpm(id, stamped.bpm, System.currentTimeMillis())
                     dao.getById(id)?.let { files.writeMeta(it) }
-                    analyzed
+                    stamped
                 } catch (_: Throwable) {
                     existing
                 } finally {

@@ -23,6 +23,7 @@ class MetronomePcmPipe(
     private var retryBuffer: ByteBuffer? = null
     private var retryPts: Long = C.TIME_UNSET
     private var mediaCursorUs: Long = 0L
+    private var haveSongPts: Boolean = false
     private var loggedStart: Boolean = false
     @Volatile var softwareSpeed: Float = 1f
     var configured: Boolean = false
@@ -53,6 +54,11 @@ class MetronomePcmPipe(
             retryBuffer!!
         } else {
             val pts = resolvePts(presentationTimeUs, source.remaining())
+            if (pts == null) {
+                val accepted = sinkHandle(source, presentationTimeUs, encodedAccessUnitCount)
+                if (accepted) source.position(source.limit())
+                return accepted
+            }
             val mixed = ClickMix.copyAndMix(
                 source,
                 mixBuffer,
@@ -99,6 +105,7 @@ class MetronomePcmPipe(
         retryBuffer = null
         retryPts = C.TIME_UNSET
         mediaCursorUs = 0L
+        haveSongPts = false
         loggedStart = false
     }
 
@@ -108,12 +115,15 @@ class MetronomePcmPipe(
         softwareSpeed = 1f
     }
 
-    private fun resolvePts(presentationTimeUs: Long, remainingBytes: Int): Long {
+    private fun resolvePts(presentationTimeUs: Long, remainingBytes: Int): Long? {
         val pts = if (presentationTimeUs == C.TIME_UNSET || presentationTimeUs < 0L) {
+            // После flush cursor=0. Не рисовать сетку t=0 на середине песни.
+            if (!haveSongPts) return null
             mediaCursorUs
         } else {
             presentationTimeUs
         }
+        haveSongPts = true
         val frameSize = ClickMix.frameSizeBytes(clickEngine.encoding, clickEngine.channelCount)
             .coerceAtLeast(1)
         val frames = remainingBytes / frameSize

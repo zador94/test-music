@@ -13,8 +13,8 @@ android {
         applicationId = "com.rehearsal.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.3.36"
+        versionCode = 44
+        versionName = "0.3.41"
     }
 
     buildTypes {

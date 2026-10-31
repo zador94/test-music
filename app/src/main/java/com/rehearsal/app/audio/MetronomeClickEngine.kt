@@ -12,9 +12,11 @@ import kotlin.math.tanh
 
 /**
  * Клик в том же PCM, что музыка: [mixInto] **после** WSOLA.
- * Ровные четверти: шаг = `periodSec` tempoOfTrack, начало = `phaseSec` микса
- * плюс калибровка. Не `60 / bpm` после 0.1 и не KickGrid по drums.
- * Клик не растягивается; позиция доли — в выходных сэмплах.
+ * Ровные четверти: шаг = `periodSec` tempoOfTrack, начало = `phaseSec` бочки
+ * в этом периоде плюс калибровка аппарата. Не `60 / bpm` после 0.1.
+ * Сетка одна на трек: [setAnalysis] фиксирует интервал и фазу, seek/BPM их не
+ * пересчитывают. TIME_UNSET не рисует t=0. Клик не растягивается; позиция доли —
+ * в выходных сэмплах с тем же коэффициентом, что WSOLA стемов.
  */
 class MetronomeClickEngine {
     @Volatile var enabled: Boolean = false
@@ -25,10 +27,15 @@ class MetronomeClickEngine {
         private set
     @Volatile var periodSec: Double = 0.0
         private set
+    @Volatile private var lockedIntervalUs: Long = BeatClock.intervalUs(DEFAULT_BPM)
     @Volatile var originalBpm: Float = DEFAULT_BPM
         set(value) {
             field = value
-            refreshGridOrigin()
+            // periodSec уже задан — шаг клика не пересчитываем из BPM.
+            if (periodSec <= 1e-9) {
+                lockedIntervalUs = BeatClock.intervalUs(value)
+                refreshGridOrigin()
+            }
         }
     @Volatile var calibrationUs: Long = 0L
         set(value) {
@@ -70,16 +77,26 @@ class MetronomeClickEngine {
         click.size.toLong() * 1_000_000L / sampleRate.coerceAtLeast(1)
 
     fun setAnalysis(analysis: TrackAnalysis?) {
-        periodSec = analysis?.periodSec ?: 0.0
-        val phase = analysis?.clickPhaseSec() ?: 0.0
+        if (analysis == null) return
+        periodSec = if (analysis.hasClickPeriod()) analysis.periodSec else 0.0
+        lockedIntervalUs = if (periodSec > 1e-9) {
+            BeatClock.intervalFromPeriodSec(periodSec)
+        } else {
+            BeatClock.intervalUs(originalBpm)
+        }
+        val phase = analysis.clickPhaseSec()
         kickPhaseUs = TempoMath.secondsToMediaUs(phase)
         refreshGridOrigin()
     }
 
-    fun clickIntervalUs(): Long {
-        if (periodSec > 1e-9) return BeatClock.intervalFromPeriodSec(periodSec)
-        return BeatClock.intervalUs(originalBpm)
+    fun clearGrid() {
+        periodSec = 0.0
+        kickPhaseUs = 0L
+        lockedIntervalUs = BeatClock.intervalUs(originalBpm)
+        refreshGridOrigin()
     }
+
+    fun clickIntervalUs(): Long = lockedIntervalUs.coerceAtLeast(1L)
 
     fun setGridOriginUs(originUs: Long) {
         gridOriginUs = originUs.coerceAtLeast(0L)
@@ -136,11 +153,9 @@ class MetronomeClickEngine {
         if (frames <= 0) return fromExclusiveUs
         val speedSafe = speed.coerceIn(0.5f, 2f)
         val inFrames = inputFrames.coerceAtLeast(1)
-        val startUs = when {
-            mediaStartUs == C.TIME_UNSET -> 0L
-            mediaStartUs < 0L -> return fromExclusiveUs
-            else -> mediaStartUs
-        }
+        // TIME_UNSET / отрицательный PTS — не t=0: после seek это середина песни.
+        if (mediaStartUs == C.TIME_UNSET || mediaStartUs < 0L) return fromExclusiveUs
+        val startUs = mediaStartUs
         val mediaDurationUs = BeatClock.sampleToMediaUs(inFrames.toLong(), sampleRate)
             .coerceAtLeast(1L)
         val endUs = startUs + mediaDurationUs

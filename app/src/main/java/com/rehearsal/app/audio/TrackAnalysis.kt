@@ -22,7 +22,7 @@ data class TrackAnalysis(
     val kickGridVersion: Int = 0,
     /** Точный период tempoOfTrack. Шаг клика, не `60 / bpm` после округления до 0.1. */
     val periodSec: Double = 0.0,
-    /** Фаза микса tempoOfTrack. Начало сетки клика, не KickGrid по drums. */
+    /** Фаза бочки по drums в [periodSec] микса. Начало сетки клика. */
     val phaseSec: Double = kickPhaseSec,
 ) {
     fun hasClickPeriod(): Boolean = periodSec.isFinite() && periodSec > 1e-9

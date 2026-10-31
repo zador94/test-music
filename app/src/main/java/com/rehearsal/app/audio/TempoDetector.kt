@@ -8,9 +8,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * BPM (подпись 0.1) + `periodSec`/`phaseSec` клика по 44.1 stereo PCM через
- * [TrackTempo] (`tempoOfTrack` по миксу). KickGrid сюда не пишет.
- * HT-Demucs не трогает: после decode, до/рядом с separate.
+ * BPM (подпись 0.1) + `periodSec` по 44.1 stereo PCM через [TrackTempo]
+ * (`tempoOfTrack` по миксу). `phaseSec` после Demucs дописывает [DrumPhase]
+ * по drums в этом периоде. KickGrid.refine не вызываем.
  */
 object TempoDetector {
     const val SAMPLE_RATE = 44100

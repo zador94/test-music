@@ -86,6 +86,7 @@ class PlaybackEngine(context: Context) {
         speedGate.reset()
         clicks.onFlush()
         mixBank.clear()
+        if (!sameTrack) clicks.clearGrid()
         loadAnalysis(track)
 
         if (!PlaybackPolicy.canStartPlayback(track)) {
