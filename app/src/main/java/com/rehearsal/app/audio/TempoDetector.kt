@@ -9,12 +9,14 @@ import kotlin.math.sqrt
 
 /**
  * BPM (подпись 0.1) + `periodSec` по 44.1 stereo PCM через [TrackTempo]
- * (`tempoOfTrack` по миксу). `phaseSec` после Demucs дописывает [DrumPhase]
- * по drums в этом периоде. KickGrid.refine не вызываем.
+ * (`tempoOfTrack` по миксу). `beats[]` — черновая сетка phase+n*period,
+ * каждая доля притянута к novelty. KickGrid.refine не вызываем.
  */
 object TempoDetector {
     const val SAMPLE_RATE = 44100
     const val HOP = 512
+    /** Окно snap доли к атаке: ±12% периода, не фиксированные ±40 мс. */
+    const val SNAP_WINDOW_PERIOD = 0.12
 
     fun analyze(pcm: StereoPcm): TrackAnalysis {
         val sr = pcm.sampleRate.coerceAtLeast(1)
@@ -26,10 +28,20 @@ object TempoDetector {
         val tracked = TrackTempo.tempoOfTrack(pcm)
         val period = tracked.periodSec
         val phase = tracked.phaseSec
+        val nov = novelty(pcm, HOP)
+        val (beats, _) = trackBeats(
+            novelty = nov,
+            bpm = tracked.bpm,
+            duration = duration,
+            hop = HOP,
+            sampleRate = sr,
+            phaseSec = phase,
+            periodSec = period,
+        )
         return TrackAnalysis(
             bpm = PlaybackMath.roundToTenth(tracked.bpm.toFloat()),
-            beats = tracked.beats,
-            downbeatOffset = phase,
+            beats = beats,
+            downbeatOffset = 0.0,
             timeSignature = intArrayOf(4, 4),
             duration = duration,
             sampleRate = sr,
@@ -111,64 +123,144 @@ object TempoDetector {
         duration: Double,
         hop: Int,
         sampleRate: Int,
+        phaseSec: Double = Double.NaN,
+        periodSec: Double = 0.0,
     ): Pair<DoubleArray, Double> {
-        val periodSec = 60.0 / bpm.coerceAtLeast(1.0)
-        val periodHops = periodSec * sampleRate / hop
+        val period = if (periodSec > 1e-9) periodSec else 60.0 / bpm.coerceAtLeast(1.0)
+        val periodHops = period * sampleRate / hop
         if (periodHops < 2.0 || novelty.isEmpty() || duration <= 0.0) {
             return DoubleArray(0) to 0.0
         }
-        val offsetSteps = periodHops.roundToInt().coerceAtLeast(2)
-        var bestOff = 0
-        var bestScore = Double.NEGATIVE_INFINITY
-        for (off in 0 until offsetSteps) {
-            var score = 0.0
-            var count = 0
-            var pos = off.toDouble()
-            while (pos < novelty.size) {
-                val i = pos.roundToInt()
-                if (i in novelty.indices) {
-                    score += novelty[i]
-                    count++
-                }
-                pos += periodHops
+        val draft = ArrayList<Double>()
+        if (phaseSec.isFinite()) {
+            var t = phaseSec % period
+            if (t < 0.0) t += period
+            if (t > period * 0.5) t -= period
+            while (t < duration - 1e-9) {
+                if (t >= -0.04) draft.add(t.coerceAtLeast(0.0))
+                t += period
             }
-            if (count > 0) score /= count
-            if (score > bestScore) {
-                bestScore = score
-                bestOff = off
+        } else {
+            val offsetSteps = periodHops.roundToInt().coerceAtLeast(2)
+            var bestOff = 0
+            var bestScore = Double.NEGATIVE_INFINITY
+            for (off in 0 until offsetSteps) {
+                var score = 0.0
+                var count = 0
+                var pos = off.toDouble()
+                while (pos < novelty.size) {
+                    val i = pos.roundToInt()
+                    if (i in novelty.indices) {
+                        score += novelty[i]
+                        count++
+                    }
+                    pos += periodHops
+                }
+                if (count > 0) score /= count
+                if (score > bestScore) {
+                    bestScore = score
+                    bestOff = off
+                }
+            }
+            var t = bestOff.toDouble() * hop / sampleRate
+            while (t < duration - 1e-9) {
+                draft.add(t)
+                t += period
             }
         }
-        val snapSec = min(0.04, periodSec * 0.25)
-        val snapHops = (snapSec * sampleRate / hop).roundToInt().coerceAtLeast(1)
-        val beats = ArrayList<Double>()
-        var t = bestOff.toDouble() * hop / sampleRate
-        while (t < duration - 1e-9) {
-            val center = (t * sampleRate / hop).roundToInt()
-            var bestI = center
-            var bestV = novelty.getOrElse(center) { 0f }
-            for (d in 1..snapHops) {
-                val left = center - d
-                val right = center + d
-                if (left in novelty.indices && novelty[left] > bestV) {
-                    bestV = novelty[left]
-                    bestI = left
-                }
-                if (right in novelty.indices && novelty[right] > bestV) {
-                    bestV = novelty[right]
-                    bestI = right
-                }
+        val beats = snapTimesToNovelty(
+            draft.toDoubleArray(),
+            novelty,
+            period,
+            hop,
+            sampleRate,
+            duration,
+        )
+        return beats to (beats.firstOrNull() ?: 0.0)
+    }
+
+    /**
+     * Каждую долю тянет к ближайшему novelty в ±[SNAP_WINDOW_PERIOD]*period.
+     * Следующая точка — от уже притянутой, шаг [periodSec], иначе дрифт
+     * 120→116 уезжает за окно неподвижной линейки. Нет онсета — точка решётки.
+     */
+    internal fun snapTimesToNovelty(
+        times: DoubleArray,
+        novelty: FloatArray,
+        periodSec: Double,
+        hop: Int,
+        sampleRate: Int,
+        duration: Double,
+    ): DoubleArray {
+        if (times.isEmpty() || novelty.isEmpty() || periodSec <= 1e-9) return times
+        val sr = sampleRate.coerceAtLeast(1)
+        val window = (SNAP_WINDOW_PERIOD * periodSec * sr / hop).roundToInt().coerceAtLeast(1)
+        var peak = 1e-8f
+        for (v in novelty) if (v > peak) peak = v
+        val thresh = peak * 0.12f
+        val out = ArrayList<Double>(times.size)
+        var last = Double.NaN
+        for (t0 in times) {
+            val predicted = if (last.isFinite()) last + periodSec else t0
+            val snapped = snapOneToNovelty(
+                predicted,
+                novelty,
+                window,
+                thresh,
+                hop,
+                sr,
+                duration,
+            )
+            if (snapped >= duration) continue
+            val prev = out.lastOrNull()
+            if (prev == null || snapped - prev > periodSec * 0.4) {
+                out.add(snapped)
+                last = snapped
             }
-            val snapped = (bestI.toDouble() * hop / sampleRate).coerceIn(0.0, duration)
-            if (snapped < duration) {
-                val last = beats.lastOrNull()
-                if (last == null || snapped - last > periodSec * 0.4) {
-                    beats.add(snapped)
-                }
-            }
-            t += periodSec
         }
-        val offset = beats.firstOrNull() ?: 0.0
-        return beats.toDoubleArray() to offset
+        return out.toDoubleArray()
+    }
+
+    private fun snapOneToNovelty(
+        t0: Double,
+        novelty: FloatArray,
+        window: Int,
+        thresh: Float,
+        hop: Int,
+        sampleRate: Int,
+        duration: Double,
+    ): Double {
+        val center = (t0 * sampleRate / hop).roundToInt()
+        var bestI = center
+        var bestV = novelty.getOrElse(center) { 0f }
+        for (d in 1..window) {
+            val left = center - d
+            val right = center + d
+            if (left in novelty.indices && novelty[left] > bestV) {
+                bestV = novelty[left]
+                bestI = left
+            }
+            if (right in novelty.indices && novelty[right] > bestV) {
+                bestV = novelty[right]
+                bestI = right
+            }
+        }
+        val useSnap = bestI != center &&
+            bestV >= thresh &&
+            isLocalMax(novelty, bestI)
+        return if (useSnap) {
+            (bestI.toDouble() * hop / sampleRate).coerceIn(0.0, duration)
+        } else {
+            t0.coerceIn(0.0, duration)
+        }
+    }
+
+    private fun isLocalMax(x: FloatArray, i: Int): Boolean {
+        if (i !in x.indices) return false
+        val v = x[i]
+        val left = x.getOrElse(i - 1) { v }
+        val right = x.getOrElse(i + 1) { v }
+        return v >= left && v >= right
     }
 
     private fun autocorr(x: FloatArray, minLag: Int, maxLag: Int): FloatArray {

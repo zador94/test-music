@@ -32,8 +32,16 @@ class TempoDetectorTest {
             0.4,
         )
         assertTrue("beats ≥ 12, was ${analysis.beats.size}", analysis.beats.size >= 12)
-        assertTrue(analysis.downbeatOffset >= 0.0)
-        assertTrue(analysis.downbeatOffset < 0.6)
+        assertEquals("downbeatOffset is beat-class index 0..3, not seconds", 0.0, analysis.downbeatOffset, 0.0)
+        val period = 0.5
+        for (i in analysis.beats.indices) {
+            val expected = i * period
+            val err = abs(analysis.beats[i] - expected)
+            assertTrue(
+                "synthetic 120 BPM beat[$i]=${analysis.beats[i]} want $expected err=${err * 1000}ms",
+                err < 0.015,
+            )
+        }
     }
 
     @Test

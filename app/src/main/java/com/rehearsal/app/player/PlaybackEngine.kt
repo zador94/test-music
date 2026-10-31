@@ -161,6 +161,7 @@ class PlaybackEngine(context: Context) {
     }
 
     fun applyKickGrid(analysis: TrackAnalysis?) {
+        // Единственное место, откуда прод-плеер кормит клик: секунды JSON → µs.
         clicks.setAnalysis(analysis)
         measuredOriginalBpm = analysis?.bpm?.let { PlaybackMath.committedOriginalBpm(it) }
     }

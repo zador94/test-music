@@ -14,7 +14,8 @@ import kotlin.math.sqrt
 
 /**
  * Разбор ударных. BPM и `periodSec` клика — [TrackTempo] по миксу.
- * Сюда — только фаза бочки **в уже готовом периоде**.
+ * [alignPhase]/[refine] → [DrumPhase.align]: snap `beats[]` к миксу,
+ * не новая сетка из одного drums `phaseSec`. VERSION не поднимаем.
  */
 object KickGrid {
     const val VERSION = 12

@@ -11,12 +11,10 @@ import kotlin.math.sin
 import kotlin.math.tanh
 
 /**
- * Клик в том же PCM, что музыка: [mixInto] **после** WSOLA.
- * Ровные четверти: шаг = `periodSec` tempoOfTrack, начало = `phaseSec` бочки
- * в этом периоде плюс калибровка аппарата. Не `60 / bpm` после 0.1.
- * Сетка одна на трек: [setAnalysis] фиксирует интервал и фазу, seek/BPM их не
- * пересчитывают. TIME_UNSET не рисует t=0. Клик не растягивается; позиция доли —
- * в выходных сэмплах с тем же коэффициентом, что WSOLA стемов.
+ * Клик в том же PCM, что музыка: [mixInto] **после** WSOLA, в remaining()
+ * того буфера, который [MetronomeAudioSink] отдаёт в DefaultAudioSink/AudioTrack.
+ * Плеер читает `beats[]` в [setAnalysis] (секунды JSON → µs). Пустой / не-µs /
+ * сетка мимо PTS стемов — решётка `periodSec`, как до 0.3.42. TIME_UNSET не t=0.
  */
 class MetronomeClickEngine {
     @Volatile var enabled: Boolean = false
@@ -26,6 +24,8 @@ class MetronomeClickEngine {
     @Volatile var gridOriginUs: Long = 0L
         private set
     @Volatile var periodSec: Double = 0.0
+        private set
+    @Volatile var beatTimesUs: LongArray = LongArray(0)
         private set
     @Volatile private var lockedIntervalUs: Long = BeatClock.intervalUs(DEFAULT_BPM)
     @Volatile var originalBpm: Float = DEFAULT_BPM
@@ -86,12 +86,15 @@ class MetronomeClickEngine {
         }
         val phase = analysis.clickPhaseSec()
         kickPhaseUs = TempoMath.secondsToMediaUs(phase)
+        // Плеер читает analysis.json здесь: секунды → µs, не сырой beats[].
+        beatTimesUs = BeatClock.beatTimesUs(analysis.beats)
         refreshGridOrigin()
     }
 
     fun clearGrid() {
         periodSec = 0.0
         kickPhaseUs = 0L
+        beatTimesUs = LongArray(0)
         lockedIntervalUs = BeatClock.intervalUs(originalBpm)
         refreshGridOrigin()
     }
@@ -160,19 +163,82 @@ class MetronomeClickEngine {
             .coerceAtLeast(1L)
         val endUs = startUs + mediaDurationUs
         val clickMediaUs = (clickDurationUs() * speedSafe.toDouble()).toLong().coerceAtLeast(1L)
+        // Красим duplicate: play-cursor [position, limit] не двигаем.
+        // DefaultAudioSink / AudioTrack пишут только remaining().
         val origin = out.position()
-        return paintEqualGrid(
-            out,
-            origin,
-            inFrames,
-            frames,
-            startUs,
-            endUs,
-            clickMediaUs,
-            clickIntervalUs(),
-            gridOriginUs,
-            fromExclusiveUs,
-        )
+        val limit = out.limit()
+        val view = out.duplicate().order(out.order())
+        val times = beatTimesUs
+        val interval = clickIntervalUs()
+        val searchStart = startUs - calibrationUs
+        val searchEnd = endUs - calibrationUs
+        // Секунды как µs / пустой beats[] / сетка не пересекает PTS стемов —
+        // firstOverlappingIndex мимо на каждом 23 мс chunk: снова решётка.
+        val useBeats = BeatClock.isPlausibleClickGrid(times, interval) &&
+            BeatClock.hasBeatNear(times, searchStart, searchEnd, interval)
+        val last = if (useBeats) {
+            paintBeatTimes(
+                view,
+                origin,
+                inFrames,
+                frames,
+                startUs,
+                endUs,
+                clickMediaUs,
+                times,
+                fromExclusiveUs,
+            )
+        } else {
+            paintEqualGrid(
+                view,
+                origin,
+                inFrames,
+                frames,
+                startUs,
+                endUs,
+                clickMediaUs,
+                interval,
+                gridOriginUs,
+                fromExclusiveUs,
+            )
+        }
+        out.position(origin)
+        out.limit(limit)
+        return last
+    }
+
+    private fun paintBeatTimes(
+        buffer: ByteBuffer,
+        origin: Int,
+        inFrames: Int,
+        outFrames: Int,
+        startUs: Long,
+        endUs: Long,
+        clickMediaUs: Long,
+        timesUs: LongArray,
+        fromExclusiveUs: Long,
+    ): Long {
+        val shift = calibrationUs
+        val searchStart = startUs - shift
+        if (BeatClock.firstOverlappingBeat(timesUs, searchStart, clickMediaUs) == Long.MAX_VALUE) {
+            return fromExclusiveUs
+        }
+        var i = BeatClock.firstOverlappingIndex(timesUs, searchStart, clickMediaUs)
+        var last = fromExclusiveUs
+        var guard = 0
+        while (i < timesUs.size && guard < MAX_BEATS_PER_BUFFER) {
+            val beatUs = timesUs[i] + shift
+            if (beatUs >= endUs) break
+            val startFrame = outputFrame(beatUs, startUs, inFrames, outFrames)
+            if (startFrame >= outFrames && beatUs > startUs) break
+            if (beatUs > fromExclusiveUs) {
+                paintClick(buffer, origin, inFrames, outFrames, startUs, beatUs)
+                last = maxOf(last, beatUs)
+            }
+            i++
+            guard++
+        }
+        return last
     }
 
     private fun paintEqualGrid(

@@ -104,10 +104,12 @@ class ClickIntervalTest {
         val engine = engine(grid)
         engine.setAnalysis(
             TrackAnalysis(
-                bpm = ols.toFloat(),
-                beats = beats,
-                downbeatOffset = beats[0],
+                bpm = grid,
+                beats = DoubleArray(0),
+                downbeatOffset = 0.0,
                 duration = beats.last() + period,
+                periodSec = period,
+                phaseSec = 0.0,
             ),
         )
         val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 6)

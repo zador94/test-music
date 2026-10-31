@@ -12,76 +12,74 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 
 /**
- * Device: click FIRST then kick, then drift. Grid phase is kickPhaseSec from drums,
- * not beats[] and not a blind +80 ms pad.
+ * 0.3.42: клик из `beats[]`, не из одной `kickPhaseSec`.
+ * Пустой `beats[]` — запасная решётка (см. ClickPeriodGridTest).
  */
 class ClickKickPhaseTest {
     @Test
-    fun kickPhaseFromAnalysisNotBeatsArray() {
+    fun clicksFollowBeatsNotSingleKickPhase() {
         val bpm = 120
         val engine = engine(bpm.toFloat())
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = bpm.toFloat(),
-                beats = doubleArrayOf(0.0, 0.5, 1.0, 1.5),
+                beats = doubleArrayOf(0.0, 0.25, 0.5, 0.80, 1.0),
                 downbeatOffset = 0.0,
                 duration = 4.0,
                 kickPhaseSec = 0.08,
+                periodSec = 0.5,
+                phaseSec = 0.08,
             ),
         )
-        val origin = 80_000L
-        assertEquals(origin, engine.gridOriginUs)
+        assertEquals(5, engine.beatTimesUs.size)
         val times = clickMediaTimesUs(engine, 0L, seconds = 2)
-        assertTrue("need clicks, was $times", times.size >= 3)
-        times.forEach { t ->
-            val dist = (t - engine.gridOriginUs).mod(BeatClock.intervalUs(bpm.toFloat()))
-            val wrap = BeatClock.intervalUs(bpm.toFloat()) - dist
-            assertTrue(
-                "click $t must sit on kickPhase 80ms, not beats[] t=0",
-                minOf(dist, wrap) < 8_000L,
-            )
+        assertTrue("need clicks, was $times", times.size >= 4)
+        val expected = longArrayOf(0L, 250_000L, 500_000L, 800_000L, 1_000_000L)
+        for (want in expected) {
+            assertTrue("click missing at beat $want, was $times", times.any { abs(it - want) < 8_000L })
         }
-        assertTrue("must not click at file t=0 when kick phase is 80ms, was $times", times.none { it < 40_000L })
-        assertTrue("click on kick phase, at $origin", times.any { abs(it - origin) < 8_000L })
-        val intervals = times.zipWithNext { a, b -> b - a }
-        val expected = BeatClock.intervalUs(bpm.toFloat())
-        intervals.forEachIndexed { i, actual ->
-            assertEquals("interval[$i] still 60/$bpm", expected.toDouble(), actual.toDouble(), 8_000.0)
-        }
+        assertTrue(
+            "must not sit on kickPhase 80ms when beats[] is present, was $times",
+            times.none { abs(it - 80_000L) < 8_000L },
+        )
     }
 
     @Test
-    fun seekAndEnableStayOnKickGridNotEnableTime() {
+    fun seekAndEnableStayOnStoredBeatsNotEnableTime() {
         val bpm = 120
         val engine = engine(bpm.toFloat())
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = bpm.toFloat(),
-                beats = doubleArrayOf(0.0, 0.5, 1.0),
+                beats = doubleArrayOf(0.0, 0.5, 1.0, 1.5, 2.0, 2.5),
                 downbeatOffset = 0.0,
                 duration = 4.0,
                 kickPhaseSec = 0.08,
+                periodSec = 0.5,
+                phaseSec = 0.08,
             ),
         )
         val enableUs = 1_200_000L
         val times = clickMediaTimesUs(engine, enableUs, seconds = 2)
-        val interval = BeatClock.intervalUs(bpm.toFloat())
         assertTrue("need clicks after enable, was $times", times.size >= 2)
-        val origin = 80_000L
-        times.forEach { t ->
-            val dist = (t - origin).mod(interval)
-            val wrap = interval - dist
-            assertTrue("enable/seek must stay on kick grid, click $t", minOf(dist, wrap) < 8_000L)
-        }
+        assertTrue(
+            "next stored beat after 1.2s is 1.5s, was $times",
+            times.any { abs(it - 1_500_000L) < 8_000L },
+        )
         assertFalse(
             "must not start a new grid at enable time 1.2s",
             times.any { abs(it - enableUs) < 8_000L },
         )
-        val next = BeatClock.beatAtOrAfter(enableUs, interval, origin)
         assertTrue(
-            "next kick beat after 1.2s is $next, was $times",
-            times.any { abs(it - next) < 8_000L },
+            "must not paint kickPhase 80ms as if it were the grid",
+            times.none { abs(it - 80_000L) < 8_000L },
         )
+        val overlapping = BeatClock.firstOverlappingBeat(
+            engine.beatTimesUs,
+            enableUs,
+            engine.clickDurationUs(),
+        )
+        assertEquals(1_500_000L, overlapping)
     }
 
     @Test

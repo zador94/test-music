@@ -119,7 +119,7 @@ class KickGridTimebaseTest {
         val bpm = 104.6
         val phaseSec = 0.08
         val pcm = realisticGlissandoKicks(bpm = bpm, phaseSec = phaseSec, bars = 8)
-        val refined = refineFromWav(pcm, bpm)
+        val refined = refineFromWav(pcm, bpm, phaseSec)
         val period = 60.0 / bpm
         val errMs = wrappedMs(refined.kickPhaseSec - phaseSec, period)
         println(
@@ -138,7 +138,7 @@ class KickGridTimebaseTest {
         val bpm = 102.0
         val phaseSec = 0.08
         val pcm = realisticGlissandoKicks(bpm = bpm, phaseSec = phaseSec, bars = 8)
-        val refined = refineFromWav(pcm, bpm)
+        val refined = refineFromWav(pcm, bpm, phaseSec)
         val errMs = wrappedMs(refined.kickPhaseSec - phaseSec, 60.0 / bpm)
         println(
             "KickGridTimebase WAV-path Fonari-tempo bpm=${refined.bpm} " +
@@ -150,19 +150,34 @@ class KickGridTimebaseTest {
         )
     }
 
-    private fun refineFromWav(pcm: StereoPcm, bpm: Double): TrackAnalysis {
+    private fun refineFromWav(pcm: StereoPcm, bpm: Double, phaseSec: Double): TrackAnalysis {
         val file = File(tmp.newFolder(), "drums.wav")
         WavWriter(file, pcm.sampleRate, channels = 2).use { writer ->
             writer.writePlanarFloatStereo(pcm.left, pcm.right)
         }
         val drums = WavReader.readStereo(file)
         val period = 60.0 / bpm
-        val seed = TrackAnalysis.fallbackGrid(drums.samples, drums.sampleRate).copy(
+        val duration = drums.samples.toDouble() / drums.sampleRate
+        val beats = ArrayList<Double>()
+        var t = phaseSec
+        while (t < duration - 1e-9) {
+            beats.add(t)
+            t += period
+        }
+        val seed = TrackAnalysis(
             bpm = bpm.toFloat(),
+            beats = beats.toDoubleArray(),
+            downbeatOffset = 0.0,
+            duration = duration,
+            sampleRate = drums.sampleRate,
             kickGridVersion = 0,
             periodSec = period,
-            phaseSec = 0.0,
+            phaseSec = phaseSec,
+            kickPhaseSec = phaseSec,
         )
+        // 0.3.42: refine не пишет сетку из одного drums phaseSec.
+        // Каждую долю — к онсету микса; здесь mix = тот же WAV.
+        // mix=null: 0.3.42 не пишет сетку из тела drums.wav — beats/origin как сид.
         return KickGrid.refine(seed, drums)
     }
 

@@ -165,7 +165,7 @@ class MetronomeClickEngineTest {
     }
 
     @Test
-    fun denseAnalysisBeatsStillClickQuartersAtOriginalBpm() {
+    fun clicksFollowStoredBeatTimes() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
         engine.setAnalysis(
@@ -182,10 +182,62 @@ class MetronomeClickEngineTest {
         val clickFrames = (engine.clickDurationUs() * sampleRate / 1_000_000L).toInt().coerceAtLeast(32)
         val at250 = BeatClock.mediaUsToSample(250_000L, sampleRate).toInt()
         val atZero = 0
-        assertTrue("eighth-note analysis must not click at 250ms", peakInRange(shorts, at250, at250 + 32) < 0.05)
         assertTrue(
-            "beats[] must not move phase; kickPhase default 0 clicks at t=0",
+            "click follows beats[] including 250ms",
+            peakInRange(shorts, at250, at250 + clickFrames) > 0.5,
+        )
+        assertTrue(
+            "click at first beat t=0",
             peakInRange(shorts, atZero, atZero + clickFrames) > 0.5,
+        )
+        assertEquals(5, engine.beatTimesUs.size)
+    }
+
+    @Test
+    fun timeUnsetWithBeatsDoesNotPaintZero() {
+        val engine = engine(enabled = true)
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = doubleArrayOf(0.0, 0.5, 1.0),
+                downbeatOffset = 0.0,
+                duration = 2.0,
+                periodSec = 0.5,
+            ),
+        )
+        val dest = silencePcm16(44100)
+        ClickLayer.render(dest, engine, C.TIME_UNSET, 1f)
+        dest.position(0)
+        dest.limit(dest.capacity())
+        val shorts = dest.duplicate().order(dest.order()).asShortBuffer()
+        assertTrue(
+            "TIME_UNSET must not paint beats[0]=0",
+            peakInRange(shorts, 0, 64) < 0.05,
+        )
+    }
+
+    @Test
+    fun emptyBeatsFallsBackToEqualGrid() {
+        val engine = engine(enabled = true)
+        engine.originalBpm = 120f
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = DoubleArray(0),
+                downbeatOffset = 0.0,
+                duration = 2.0,
+                periodSec = 0.5,
+                phaseSec = 0.0,
+            ),
+        )
+        assertEquals(0, engine.beatTimesUs.size)
+        val out = clickLayer(engine, silencePcm16(44100), 0L)
+        val shorts = out.duplicate().order(out.order()).asShortBuffer()
+        val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
+        val at500 = BeatClock.mediaUsToSample(500_000L, 44100).toInt()
+        assertTrue(
+            "empty beats[] falls back to periodSec grid",
+            peakInRange(shorts, at500, at500 + clickFrames) > 0.5,
         )
     }
 

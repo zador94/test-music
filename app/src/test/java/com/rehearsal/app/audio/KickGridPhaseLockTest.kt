@@ -28,11 +28,13 @@ class KickGridPhaseLockTest {
         val aligned = KickGrid.alignPhase(mix, drums)
         assertEquals("drums must not rewrite mix BPM", 153.2f, aligned.bpm, 1e-3f)
         assertEquals(period, aligned.periodSec, 1e-12)
-        val err = wrapped(aligned.phaseSec - kickAt, period)
-        assertTrue(
-            "phase in mix period, was ${aligned.phaseSec} err=${err * 1000}ms",
-            abs(err) < 0.03,
+        assertEquals(
+            "empty beats[]: align must not rewrite the grid with one drums phaseSec",
+            0.0,
+            aligned.phaseSec,
+            0.0,
         )
+        assertEquals(0, aligned.beats.size)
         assertEquals(aligned.phaseSec, aligned.kickPhaseSec, 1e-12)
         val json = aligned.toJson()
         val parsed = TrackAnalysis.fromJson(json)!!

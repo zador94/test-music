@@ -128,5 +128,39 @@ class BeatClockTest {
             3,
             BeatClock.firstOverlappingIndex(beats, 1_200_000L, 18_000L),
         )
+        assertEquals(
+            1_500_000L,
+            BeatClock.firstOverlappingBeat(beats, 1_200_000L, 18_000L),
+        )
+        assertEquals(Long.MAX_VALUE, BeatClock.firstOverlappingBeat(beats, 2_000_000L, 1_000L))
+    }
+
+    @Test
+    fun beatTimesUsConvertsSecondsNotLeavingThemAsMicros() {
+        val us = BeatClock.beatTimesUs(doubleArrayOf(0.0, 0.5, 1.0, 1.5))
+        assertEquals(4, us.size)
+        assertEquals(0L, us[0])
+        assertEquals(500_000L, us[1])
+        assertEquals(1_000_000L, us[2])
+        assertTrue(BeatClock.isPlausibleClickGrid(us, 500_000L))
+        val secondsAsLong = longArrayOf(0L, 1L, 1L, 2L, 2L)
+        assertTrue(
+            "truncated seconds must not look like a µs click grid",
+            !BeatClock.isPlausibleClickGrid(secondsAsLong, 500_000L),
+        )
+        assertEquals(Long.MAX_VALUE, BeatClock.firstOverlappingBeat(secondsAsLong, 1_200_000L, 6_000L))
+    }
+
+    @Test
+    fun hasBeatNearIsFalseWhenGridLivesInAnotherTimebase() {
+        val songBeats = longArrayOf(0L, 500_000L, 1_000_000L)
+        assertTrue(BeatClock.hasBeatNear(songBeats, 0L, 23_219L, 500_000L))
+        assertTrue(BeatClock.hasBeatNear(songBeats, 488_000L, 511_219L, 500_000L))
+        val hoursAway = longArrayOf(3_600_000_000L, 3_600_500_000L, 3_601_000_000L)
+        assertTrue(BeatClock.isPlausibleClickGrid(hoursAway, 500_000L))
+        assertTrue(
+            "plausible µs grid that never meets stem PTS must not keep mixInto silent",
+            !BeatClock.hasBeatNear(hoursAway, 0L, 23_219L, 500_000L),
+        )
     }
 }

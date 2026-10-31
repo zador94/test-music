@@ -1,29 +1,19 @@
 package com.rehearsal.app.audio
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
 /**
- * 0.3.41: phaseSec — слышимая атака микса, если тело Demucs стабильно позже.
- * Литералы 0.576 / 0.076 — гребёнка энергии стема, не клик.
- * Лаг измеряется, не константа 200 мс. periodSec микса не меняется.
+ * 0.3.42: [DrumPhase.align] не двигает всю сетку одним phaseSec.
+ * Каждую долю — к онсету микса, не к телу drums.wav. periodSec/bpm те же.
  */
 class DrumPhaseLockTest {
     @Test
-    fun skyfallMixAttackWhenDrumsBodyLater() {
+    fun alignDoesNotRewriteEmptyBeatsFromDrumsPhase() {
         val period = 0.800117626775
         val drumsBody = 0.576448941793
-        val mixAttack = drumsBody - 0.20
-        val mixPcm = KickOffsetDiagnosisTest.rampedKicks(
-            bpm = 60.0 / period,
-            phaseSec = mixAttack,
-            attackSec = 0.20,
-            bars = 8,
-        )
         val drums = KickOffsetDiagnosisTest.kicks(
             bpm = 60.0 / period,
             phaseSec = drumsBody,
@@ -31,35 +21,84 @@ class DrumPhaseLockTest {
             f0 = 55.0,
             bars = 8,
         )
+        val mixPcm = KickOffsetDiagnosisTest.kicks(
+            bpm = 60.0 / period,
+            phaseSec = 0.376448941793,
+            decaySec = 0.04,
+            f0 = 70.0,
+            bars = 8,
+        )
         val energyComb = DrumPhase.energyCombPhase(drums, period)
         assertTrue(
             "drums energy comb still on 0.576, got $energyComb",
             abs(wrapped(energyComb - drumsBody, period)) < 0.06,
         )
-        val lag = DrumPhase.stableBodyLagSec(mixPcm, drums, period)
-        assertNotNull("Demucs body must be stably later than mix attack, lag=$lag", lag)
-        assertTrue("lag is measured, not 200ms constant: $lag", abs(lag!! - 0.20) < 0.05)
         val aligned = DrumPhase.align(
-            analysis(75f, period, drumsBody, mixPcm),
+            analysis(75f, period, drumsBody, drums, DoubleArray(0)),
             drums,
             mixPcm,
         )
         assertEquals("Skyfall periodSec must not change", period, aligned.periodSec, 0.0)
         assertEquals(75f, aligned.bpm, 0.0f)
         assertEquals(KickGrid.VERSION, aligned.kickGridVersion)
-        val fromBody = wrapped(aligned.phaseSec - drumsBody, period)
-        val fromAttack = wrapped(aligned.phaseSec - mixAttack, period)
-        assertTrue(
-            "Skyfall phaseSec from mix attack, not drums 0.576. " +
-                "got=${aligned.phaseSec} Δbody=$fromBody Δattack=$fromAttack",
-            abs(fromAttack) < 0.05,
+        assertEquals(0, aligned.beats.size)
+        assertEquals(
+            "empty beats[]: origin stays, drums body does not become the grid",
+            drumsBody,
+            aligned.phaseSec,
+            0.0,
         )
-        assertTrue("must leave 0.576 by tenths, Δ=$fromBody", abs(fromBody) in 0.12..0.30)
+        assertEquals(0.0, aligned.downbeatOffset, 0.0)
         assertEquals(aligned.phaseSec, aligned.kickPhaseSec, 1e-12)
     }
 
     @Test
-    fun titanicMixAttackWhenDrumsNotDelayed() {
+    fun alignSnapsBeatsToMixNotDrumsBody() {
+        val period = 0.5
+        val mixAttack = 0.08
+        val drumsBody = 0.28
+        val mixPcm = KickOffsetDiagnosisTest.kicks(
+            bpm = 120.0,
+            phaseSec = mixAttack,
+            decaySec = 0.04,
+            f0 = 70.0,
+            bars = 8,
+        )
+        val drums = KickOffsetDiagnosisTest.kicks(
+            bpm = 120.0,
+            phaseSec = drumsBody,
+            decaySec = 0.04,
+            f0 = 55.0,
+            bars = 8,
+        )
+        val draft = DoubleArray(16) { i -> mixAttack + i * period }
+        val aligned = DrumPhase.align(
+            analysis(120f, period, mixAttack, mixPcm, draft),
+            drums,
+            mixPcm,
+        )
+        assertEquals(period, aligned.periodSec, 0.0)
+        assertEquals(120f, aligned.bpm, 0.0f)
+        assertEquals(0.0, aligned.downbeatOffset, 0.0)
+        assertTrue("need snapped beats, was ${aligned.beats.size}", aligned.beats.size >= 8)
+        for (i in 0 until minOf(8, aligned.beats.size)) {
+            val want = mixAttack + i * period
+            val errMix = abs(aligned.beats[i] - want)
+            val errDrums = abs(aligned.beats[i] - (drumsBody + i * period))
+            assertTrue(
+                "beat[$i]=${aligned.beats[i]} must stay on mix $want, not drums body. " +
+                    "Δmix=${errMix * 1000}ms Δdrums=${errDrums * 1000}ms",
+                errMix < 0.030,
+            )
+            assertTrue("must not rewrite the grid onto drums body", errDrums > 0.10)
+        }
+        val origin = aligned.phaseSec
+        assertTrue("origin is first beat in the period, was $origin", abs(origin - mixAttack) < 0.030)
+        assertEquals(aligned.phaseSec, aligned.kickPhaseSec, 1e-12)
+    }
+
+    @Test
+    fun alignKeepsPeriodBpmAndBeatClassOffset() {
         val period = 0.571245460987
         val mixAttack = 0.075738712844
         val mixPcm = KickOffsetDiagnosisTest.kicks(
@@ -76,66 +115,22 @@ class DrumPhaseLockTest {
             f0 = 70.0,
             bars = 8,
         )
-        val lag = DrumPhase.stableBodyLagSec(mixPcm, drums, period)
-        assertNull("no stable Demucs delay when mix and drums agree, lag=$lag", lag)
+        val draft = DoubleArray(12) { i -> mixAttack + i * period }
         val aligned = DrumPhase.align(
-            analysis(105f, period, mixAttack, mixPcm),
+            analysis(105f, period, mixAttack, mixPcm, draft),
             drums,
             mixPcm,
         )
         assertEquals("Titanic periodSec must not change", period, aligned.periodSec, 0.0)
         assertEquals(105f, aligned.bpm, 0.0f)
-        val fromMix = wrapped(aligned.phaseSec - mixAttack, period)
-        assertTrue(
-            "Titanic stays on mix attack 0.076, not a 0.19s stem guess. " +
-                "got=${aligned.phaseSec} Δ=$fromMix",
-            abs(fromMix) < 0.04,
-        )
-        assertEquals(aligned.phaseSec, aligned.kickPhaseSec, 1e-12)
+        assertEquals(0.0, aligned.downbeatOffset, 0.0)
+        assertEquals(KickGrid.VERSION, aligned.kickGridVersion)
         val json = aligned.toJson()
         val parsed = TrackAnalysis.fromJson(json)!!
         assertEquals(period, parsed.periodSec, 1e-12)
-        assertEquals(aligned.phaseSec, parsed.phaseSec, 1e-12)
         assertEquals(105f, parsed.bpm, 1e-3f)
-    }
-
-    @Test
-    fun demucsLagIsMeasuredNotHardcoded200ms() {
-        val period = 0.800117626775
-        val drumsBody = 0.576448941793
-        for (lagSec in doubleArrayOf(0.12, 0.28)) {
-            val mixAttack = drumsBody - lagSec
-            val mixPcm = KickOffsetDiagnosisTest.rampedKicks(
-                bpm = 60.0 / period,
-                phaseSec = mixAttack,
-                attackSec = lagSec,
-                bars = 8,
-            )
-            val drums = KickOffsetDiagnosisTest.kicks(
-                bpm = 60.0 / period,
-                phaseSec = drumsBody,
-                decaySec = 0.04,
-                f0 = 55.0,
-                bars = 8,
-            )
-            val measured = DrumPhase.stableBodyLagSec(mixPcm, drums, period)
-            assertNotNull("lag $lagSec must be measured, got $measured", measured)
-            assertTrue(
-                "measured $measured must follow $lagSec, not 0.200",
-                abs(measured!! - lagSec) < 0.05,
-            )
-            val aligned = DrumPhase.align(
-                analysis(75f, period, drumsBody, mixPcm),
-                drums,
-                mixPcm,
-            )
-            val fromAttack = wrapped(aligned.phaseSec - mixAttack, period)
-            assertTrue(
-                "phase follows mix attack at lag=$lagSec, got=${aligned.phaseSec}",
-                abs(fromAttack) < 0.05,
-            )
-            assertEquals(period, aligned.periodSec, 0.0)
-        }
+        assertEquals(aligned.beats.size, parsed.beats.size)
+        assertEquals(0.0, parsed.downbeatOffset, 0.0)
     }
 
     @Test
@@ -153,7 +148,7 @@ class DrumPhaseLockTest {
         val analysis = TrackAnalysis(
             bpm = 75f,
             beats = DoubleArray(0),
-            downbeatOffset = 0.576448941793,
+            downbeatOffset = 0.0,
             duration = 8.0,
             kickPhaseSec = 0.376448941793,
             periodSec = 0.800117626775,
@@ -166,6 +161,7 @@ class DrumPhaseLockTest {
         val mixWritten = analysis.copy(phaseSec = 0.376448941793, kickPhaseSec = 0.376448941793)
         engine.setAnalysis(mixWritten)
         assertEquals(TempoMath.secondsToMediaUs(0.376448941793), engine.kickPhaseUs)
+        assertEquals(0, engine.beatTimesUs.size)
     }
 
     private fun analysis(
@@ -173,10 +169,11 @@ class DrumPhaseLockTest {
         period: Double,
         mixPhase: Double,
         pcm: StereoPcm,
+        beats: DoubleArray,
     ): TrackAnalysis = TrackAnalysis(
         bpm = bpm,
-        beats = DoubleArray(0),
-        downbeatOffset = mixPhase,
+        beats = beats,
+        downbeatOffset = 0.0,
         duration = pcm.samples.toDouble() / pcm.sampleRate,
         sampleRate = pcm.sampleRate,
         kickPhaseSec = mixPhase,

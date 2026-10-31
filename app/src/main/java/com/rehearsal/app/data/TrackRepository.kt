@@ -39,9 +39,9 @@ class TrackRepository(
     suspend fun get(id: String): TrackEntity? = dao.getById(id)
 
     /**
-     * Сетка клика: `tempoOfTrack` по миксу (period/BPM), затем фаза: атака микса,
-     * если тело drums стабильно позже, иначе бочка стема. [force] — кнопка;
-     * иначе если нет `periodSec` или устарел KickGrid.
+     * Сетка клика: `tempoOfTrack` по миксу (period/BPM), `beats[]` с snap
+     * каждой доли к атаке. [force] — кнопка «Пересчитать»: тот же analyze+align.
+     * Иначе если нет `periodSec` или устарел KickGrid.
      */
     suspend fun refreshKickGrid(id: String, force: Boolean = false): TrackAnalysis? {
         val mutex = synchronized(kickGridLocks) { kickGridLocks.getOrPut(id) { Mutex() } }

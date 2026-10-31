@@ -124,9 +124,11 @@ class KickGridTest {
         assertTrue(!KickGrid.needsRefresh(refined))
         assertEquals("drums must not pick BPM", 120f, refined.bpm, 1e-3f)
         assertEquals(period, refined.periodSec, 1e-12)
-        assertTrue(
-            "refine must rewrite late phase, was ${refined.kickPhaseSec}",
-            kotlin.math.abs(refined.kickPhaseSec - 0.08) < 0.03,
+        assertEquals(
+            "empty beats[]: refine must not replace the grid with one drums phase",
+            0.4,
+            refined.phaseSec,
+            0.0,
         )
         assertEquals(refined.phaseSec, refined.kickPhaseSec, 1e-12)
     }

@@ -143,4 +143,80 @@ object BeatClock {
         val earliest = mediaStartUs - clickDurationUs.coerceAtLeast(1L) + 1L
         return firstIndexAtOrAfter(timesUs, earliest)
     }
+
+    /** Время первой пересекающей метки; нет метки — [Long.MAX_VALUE]. */
+    fun firstOverlappingBeat(
+        timesUs: LongArray,
+        mediaStartUs: Long,
+        clickDurationUs: Long,
+    ): Long {
+        val i = firstOverlappingIndex(timesUs, mediaStartUs, clickDurationUs)
+        if (i !in timesUs.indices) return Long.MAX_VALUE
+        return timesUs[i]
+    }
+
+    /**
+     * Есть ли доля в окне буфера ± один период. Если `beats[]` в другой
+     * шкале, чем PTS стемов, ни один 23 мс chunk её не содержит — тогда
+     * [MetronomeClickEngine] должен снова красить равную решётку.
+     */
+    fun hasBeatNear(
+        timesUs: LongArray,
+        startUs: Long,
+        endUs: Long,
+        intervalUs: Long,
+    ): Boolean {
+        if (timesUs.isEmpty()) return false
+        val pad = intervalUs.coerceAtLeast(1L)
+        val lo = startUs - pad
+        val hi = endUs + pad
+        val i = firstIndexAtOrAfter(timesUs, lo)
+        return i < timesUs.size && timesUs[i] <= hi
+    }
+
+    /**
+     * `analysis.json` хранит `beats[]` в **секундах**. Если значения уже
+     * микросекунды (max > 10 с как если бы это были µs) — не умножаем снова.
+     */
+    fun beatTimesUs(beatsSec: DoubleArray): LongArray {
+        if (beatsSec.isEmpty()) return LongArray(0)
+        var max = 0.0
+        for (t in beatsSec) if (t.isFinite() && t > max) max = t
+        val alreadyUs = max > ALREADY_US_SEC
+        val out = LongArray(beatsSec.size) { i ->
+            val t = beatsSec[i]
+            if (!t.isFinite() || t < 0.0) {
+                0L
+            } else if (alreadyUs) {
+                t.roundToLong().coerceAtLeast(0L)
+            } else {
+                (t * 1_000_000.0).roundToLong().coerceAtLeast(0L)
+            }
+        }
+        out.sort()
+        return out
+    }
+
+    /**
+     * Сетка клика в µs: шаг около [intervalUs], не 0/1 (секунды как Long)
+     * и не десятки секунд (hop как «секунды»).
+     */
+    fun isPlausibleClickGrid(timesUs: LongArray, intervalUs: Long): Boolean {
+        if (timesUs.size < 2) return false
+        val dts = ArrayList<Long>(timesUs.size - 1)
+        for (i in 1 until timesUs.size) {
+            val dt = timesUs[i] - timesUs[i - 1]
+            if (dt > 0L) dts.add(dt)
+        }
+        if (dts.isEmpty()) return false
+        dts.sort()
+        val median = dts[dts.size / 2]
+        if (median < MIN_BEAT_STEP_US) return false
+        val interval = intervalUs.coerceAtLeast(1L)
+        return median >= interval / 4L && median <= interval * 4L
+    }
+
+    /** Короче 5 мс — не четверть; 10 с как число > 10000 — уже µs, не секунды. */
+    const val MIN_BEAT_STEP_US = 5_000L
+    const val ALREADY_US_SEC = 10_000.0
 }

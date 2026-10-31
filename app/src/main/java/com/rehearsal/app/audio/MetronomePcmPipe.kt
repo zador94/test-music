@@ -85,7 +85,13 @@ class MetronomePcmPipe(
                 loggedStart = true
                 logStart(pts, inFrames, outFrames)
             }
+            val playFrom = stretched.position()
+            val playTo = stretched.limit()
             clickEngine.mixInto(stretched, pts, softwareSpeed, inFrames, outFrames)
+            // mixInto пишет absolute putShort; курсор мог уехать за клики.
+            // DefaultAudioSink играет только remaining() — вернуть play-region.
+            stretched.position(playFrom)
+            stretched.limit(playTo)
             retryBuffer = stretched
             retryPts = presentationTimeUs
             stretched

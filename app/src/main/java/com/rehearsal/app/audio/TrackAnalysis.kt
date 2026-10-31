@@ -12,6 +12,7 @@ import kotlin.math.roundToLong
 data class TrackAnalysis(
     val bpm: Float,
     val beats: DoubleArray,
+    /** Индекс доли 0..3, не секунды. */ 
     val downbeatOffset: Double,
     val timeSignature: IntArray = intArrayOf(4, 4),
     val duration: Double,
@@ -36,13 +37,7 @@ data class TrackAnalysis(
 
     fun clickPhaseSec(): Double = if (phaseSec.isFinite()) phaseSec else kickPhaseSec
 
-    fun beatTimesUs(): LongArray {
-        val out = LongArray(beats.size) { i ->
-            TempoMath.secondsToMediaUs(beats[i])
-        }
-        out.sort()
-        return out
-    }
+    fun beatTimesUs(): LongArray = BeatClock.beatTimesUs(beats)
 
     fun toJson(): String {
         val beatsBody = if (beats.isEmpty()) {
@@ -95,7 +90,7 @@ data class TrackAnalysis(
             return TrackAnalysis(
                 bpm = bpm,
                 beats = beats.toDoubleArray(),
-                downbeatOffset = beats.firstOrNull() ?: 0.0,
+                downbeatOffset = 0.0,
                 duration = duration,
                 sampleRate = sr,
                 kickPhaseSec = 0.0,

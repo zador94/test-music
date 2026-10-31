@@ -9,13 +9,12 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Фаза клика в уже готовом [TrackAnalysis.periodSec]. BPM не считает,
- * 150→75 не складывает, [KickGrid.refine] не вызывает, [TrackTempo] не трогает.
+ * После [TempoDetector]: не переписывает весь [TrackAnalysis.beats] одним
+ * `phaseSec`. BPM не считает, 150→75 не складывает, [TrackTempo] не трогает.
+ * Клик в плеере читает `beats[]`, не эту фазу.
  *
- * 0.3.40 онсеты по drums.wav нестабильны: стем Demucs размазывает бочку.
- * 0.3.41 сравнивает **атаку микса** (гребёнка потока, не тело) и тело drums.
- * Если тело стема стабильно позже атаки микса — [phaseSec] с атаки микса
- * в том же периоде. Лаг измеряется по ударам, не константа 200 мс.
+ * 0.3.42: каждую уже найденную долю тянет к онсету **микса** (±12% периода),
+ * не к телу drums.wav. [periodSec]/[bpm] не меняет. Origin — первая доля.
  */
 object DrumPhase {
     /** Атака бочки до тела, которое Demucs часто сажает на ~0.3 с позже. */
@@ -81,9 +80,9 @@ object DrumPhase {
     }
 
     /**
-     * Пишет фазу в [TrackAnalysis.phaseSec] и [TrackAnalysis.kickPhaseSec].
-     * [TrackAnalysis.periodSec] и [TrackAnalysis.bpm] микса не меняет.
-     * [mix] — слышимая атака; если тело Demucs стабильно позже, берём её.
+     * Не переписывает весь [TrackAnalysis.beats] одним phaseSec.
+     * [periodSec]/[bpm] микса не меняет. Если есть mix — каждую долю
+     * тянет к онсету микса (±12% периода), не к телу drums.wav.
      */
     fun align(
         existing: TrackAnalysis,
@@ -95,20 +94,47 @@ object DrumPhase {
         } else {
             existing.clickPeriodSec()
         }
-        val phase = try {
-            if (mix != null) {
-                phaseFromMixOrDrums(mix, drums, period)
+        val beats = try {
+            if (mix != null && existing.beats.isNotEmpty()) {
+                snapBeatsToMix(existing.beats, mix, period)
             } else {
-                phaseInPeriod(drums, period)
+                existing.beats
             }
         } catch (_: Throwable) {
-            return existing
+            existing.beats
+        }
+        val originAbs = beats.firstOrNull()
+        val origin = if (originAbs != null && period > 1e-9) {
+            positiveMod(originAbs, period)
+        } else {
+            existing.phaseSec
         }
         return existing.copy(
-            kickPhaseSec = phase,
-            phaseSec = phase,
-            downbeatOffset = phase,
+            beats = beats,
+            kickPhaseSec = origin,
+            phaseSec = origin,
+            downbeatOffset = 0.0,
             kickGridVersion = KickGrid.VERSION,
+            periodSec = existing.periodSec,
+            bpm = existing.bpm,
+        )
+    }
+
+    internal fun snapBeatsToMix(
+        beats: DoubleArray,
+        mix: StereoPcm,
+        periodSec: Double,
+    ): DoubleArray {
+        val sr = mix.sampleRate.coerceAtLeast(1)
+        val duration = mix.samples.toDouble() / sr
+        val nov = TempoDetector.novelty(mix, KickGrid.HOP)
+        return TempoDetector.snapTimesToNovelty(
+            beats,
+            nov,
+            periodSec,
+            KickGrid.HOP,
+            sr,
+            duration,
         )
     }
 
