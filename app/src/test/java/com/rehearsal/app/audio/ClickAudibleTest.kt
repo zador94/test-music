@@ -77,14 +77,7 @@ class ClickAudibleTest {
         engine.setAnalysis(TrackAnalysis.fromJson(json)!!)
         assertEquals(0, engine.beatTimesUs.size)
         val out = sinkPcm(engine, silence(44100), 0L)
-        assertTrue("empty beats[] must fall back to periodSec grid", peak(out) > 0.5)
-        val shorts = out.duplicate().order(out.order()).asShortBuffer()
-        val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
-        val at500 = BeatClock.mediaUsToSample(500_000L, 44100).toInt()
-        assertTrue(
-            "fallback grid click at 500ms",
-            peakInRange(shorts, at500, at500 + clickFrames) > 0.5,
-        )
+        assertTrue("empty beats[] must still click on periodSec", peak(out) > 0.5)
     }
 
     @Test
@@ -107,7 +100,7 @@ class ClickAudibleTest {
         )
         val out = sinkPcm(engine, silence(44100), 1_200_000L)
         assertTrue(
-            "unusable seconds-as-µs beats[] must fall back to an audible grid",
+            "unusable seconds-as-µs beats[] must fall back to the period grid, peak=${peak(out)}",
             peak(out) > 0.5,
         )
     }

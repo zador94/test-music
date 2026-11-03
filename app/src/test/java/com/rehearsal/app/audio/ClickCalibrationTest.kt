@@ -22,7 +22,8 @@ class ClickCalibrationTest {
         assertEquals(-180_000L, ClickCalibration.toUs(-180))
         assertEquals(-500_000L, ClickCalibration.toUs(-500))
         assertEquals(0, ClickCalibration.DEFAULT_MS)
-        assertEquals("click_shift_ms_v37", ClickCalibration.KEY_SHIFT_MS)
+        assertEquals("click_shift_ms_v43", ClickCalibration.KEY_SHIFT_MS)
+        assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS_V42)
         assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS)
         assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS_V21)
         assertTrue(ClickCalibration.KEY_SHIFT_MS != ClickCalibration.LEGACY_KEY_SHIFT_MS_V28)
@@ -47,10 +48,12 @@ class ClickCalibrationTest {
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = bpm,
-                beats = DoubleArray(0),
+                beats = TrackAnalysis.quarterBeats(0.5, 4.0, 0.08),
                 downbeatOffset = 0.0,
                 duration = 4.0,
                 kickPhaseSec = 0.08,
+                periodSec = 0.5,
+                phaseSec = 0.08,
             ),
         )
         val base = clickTimes(engine, seconds = 2)
@@ -89,6 +92,7 @@ class ClickCalibrationTest {
         )
         engine.originalBpm = originalBpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(originalBpm))
         return engine
     }
 

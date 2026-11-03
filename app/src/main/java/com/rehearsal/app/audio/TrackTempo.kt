@@ -12,8 +12,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Порт `lib/track-tempo.ts` из beat-sense, функция в функцию.
- * Не микрофонный `tempo.ts`. Не угаданные тела 0.3.33/0.3.34.
+ * Stereo PCM → [Stembeat] (onset_strength + beat_track tightness 100).
+ * FloatArray-вход остаётся портом beat-sense `track-tempo.ts` для старых тестов.
  */
 object TrackTempo {
     const val MIN_BPM = 55.0
@@ -76,6 +76,18 @@ object TrackTempo {
         val n = pcm.samples
         val sr = pcm.sampleRate
         val duration = n.toDouble() / sr.coerceAtLeast(1)
+        if (n >= sr / 2) {
+            val tracked = Stembeat.track(pcm)
+            return Result(
+                bpm = tracked.bpm,
+                phaseSec = tracked.beats.firstOrNull() ?: 0.0,
+                periodSec = tracked.periodSec,
+                beats = tracked.beats,
+                flux = tracked.onset,
+                envelope = tracked.onset,
+                confidence = 1.0,
+            )
+        }
         val mono = FloatArray(n) { i -> 0.5f * (pcm.left[i] + pcm.right[i]) }
         val estimate = tempoOfTrack(mono, sr) ?: return fallback(duration)
         val period = estimate.period

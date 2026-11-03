@@ -16,8 +16,7 @@ import kotlin.math.abs
  */
 class ClickGridLockTest {
     @Test
-    fun originalBpmChangeDoesNotRewriteLockedPeriod() {
-        val period = 0.800117626775
+    fun originalBpmChangeRewritesClickStep() {
         val engine = engine(120f)
         engine.setAnalysis(
             TrackAnalysis(
@@ -26,18 +25,20 @@ class ClickGridLockTest {
                 downbeatOffset = 0.228,
                 duration = 8.0,
                 kickPhaseSec = 0.228,
-                periodSec = period,
+                periodSec = 0.800117626775,
                 phaseSec = 0.228,
             ),
         )
-        val locked = BeatClock.intervalFromPeriodSec(period)
-        assertEquals(locked, engine.clickIntervalUs())
         engine.originalBpm = 75f
+        assertEquals(BeatClock.intervalUs(75f), engine.clickIntervalUs())
         engine.originalBpm = 104.6f
-        engine.originalBpm = 153.2f
-        assertEquals("BPM rounding must not change click step", locked, engine.clickIntervalUs())
+        assertEquals(BeatClock.intervalUs(104.6f), engine.clickIntervalUs())
         assertEquals(TempoMath.secondsToMediaUs(0.228), engine.kickPhaseUs)
-        assertEquals(TempoMath.secondsToMediaUs(0.228), engine.gridOriginUs)
+        val origin = engine.gridOriginUs
+        val interval = engine.clickIntervalUs()
+        val phase = TempoMath.secondsToMediaUs(0.228)
+        val dist = (origin - phase).mod(interval)
+        assertEquals(0L, minOf(dist, interval - dist))
     }
 
     @Test
@@ -101,6 +102,7 @@ class ClickGridLockTest {
         engine.configure(pcm16())
         engine.originalBpm = originalBpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(originalBpm))
         return engine
     }
 

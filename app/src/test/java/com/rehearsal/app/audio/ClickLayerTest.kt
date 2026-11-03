@@ -31,7 +31,7 @@ class ClickLayerTest {
     @Test
     fun emptyAnalysisClicksOnOriginalBpmGrid() {
         val engine = engine()
-        engine.setAnalysis(null)
+        engine.clearGrid()
         val out = layer(engine, silence(44100), 0L)
         assertFalse("BeatClock grid must click without analysis", isSilent(out))
         val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt()
@@ -69,6 +69,7 @@ class ClickLayerTest {
         )
         engine.originalBpm = 120f
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         assertTrue("0.3.8: AAC mime at the sink is still decoded PCM", engine.isPcm())
         val out = layer(engine, silence(2048), 0L)
         assertFalse(isSilent(out))
@@ -97,6 +98,7 @@ class ClickLayerTest {
         val engine = MetronomeClickEngine()
         engine.originalBpm = 120f
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         return engine
     }
 

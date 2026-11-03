@@ -172,7 +172,16 @@ class StemMixBankTest {
     fun metronomeGridClicksWhenBeatsArrayEmpty() {
         val engine = pcm16Engine(enabled = true)
         engine.originalBpm = 120f
-        engine.setAnalysis(null)
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = DoubleArray(0),
+                downbeatOffset = 0.0,
+                duration = 2.0,
+                periodSec = 0.5,
+                phaseSec = 0.0,
+            ),
+        )
         val layer = ByteBuffer.allocateDirect(44100 * 4).order(ByteOrder.nativeOrder())
         layer.limit(44100 * 4)
         ClickLayer.render(layer, engine, 0L, 1f)
@@ -216,6 +225,8 @@ class StemMixBankTest {
                 .build(),
         )
         engine.enabled = enabled
+        engine.originalBpm = 120f
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         return engine
     }
 

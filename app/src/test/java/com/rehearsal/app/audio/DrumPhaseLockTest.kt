@@ -38,16 +38,13 @@ class DrumPhaseLockTest {
             drums,
             mixPcm,
         )
-        assertEquals("Skyfall periodSec must not change", period, aligned.periodSec, 0.0)
-        assertEquals(75f, aligned.bpm, 0.0f)
+        assertEquals("step is 60/the measured hundredth", 60.0 / aligned.bpm, aligned.periodSec, 1e-9)
+        assertEquals(74.99f, aligned.bpm, 0.02f)
         assertEquals(KickGrid.VERSION, aligned.kickGridVersion)
-        assertEquals(0, aligned.beats.size)
-        assertEquals(
-            "empty beats[]: origin stays, drums body does not become the grid",
-            drumsBody,
-            aligned.phaseSec,
-            0.0,
-        )
+        assertTrue("even grid replaces empty beats", aligned.beats.size >= 4)
+        for (i in 1 until aligned.beats.size) {
+            assertEquals(aligned.periodSec, aligned.beats[i] - aligned.beats[i - 1], 1e-6)
+        }
         assertEquals(0.0, aligned.downbeatOffset, 0.0)
         assertEquals(aligned.phaseSec, aligned.kickPhaseSec, 1e-12)
     }
@@ -98,6 +95,29 @@ class DrumPhaseLockTest {
     }
 
     @Test
+    fun alignKeepsEachStembeatWhenPeriodDoesNotMatch() {
+        val frozenPeriod = 0.5
+        val kicks = DoubleArray(16) { i -> i * 0.6 }
+        val pcm = ClickBeatDriftTest.kicksAt(kicks)
+        val aligned = DrumPhase.align(
+            analysis(100f, frozenPeriod, 0.0, pcm, kicks),
+            pcm,
+            pcm,
+        )
+        val late = kicks.last()
+        val nearest = aligned.beats.minBy { abs(it - late) }
+        val ladder = (kicks.size - 1) * frozenPeriod
+        assertTrue(
+            "late kick $late must stay, nearest snapped $nearest",
+            abs(nearest - late) < 0.040,
+        )
+        assertTrue(
+            "must not walk last+period onto the 120 ladder $ladder, nearest $nearest",
+            abs(nearest - ladder) > 0.20,
+        )
+    }
+
+    @Test
     fun alignKeepsPeriodBpmAndBeatClassOffset() {
         val period = 0.571245460987
         val mixAttack = 0.075738712844
@@ -121,14 +141,14 @@ class DrumPhaseLockTest {
             drums,
             mixPcm,
         )
-        assertEquals("Titanic periodSec must not change", period, aligned.periodSec, 0.0)
-        assertEquals(105f, aligned.bpm, 0.0f)
+        assertEquals("step is 60/the measured hundredth", 60.0 / aligned.bpm, aligned.periodSec, 1e-9)
+        assertEquals(105.03f, aligned.bpm, 0.02f)
         assertEquals(0.0, aligned.downbeatOffset, 0.0)
         assertEquals(KickGrid.VERSION, aligned.kickGridVersion)
         val json = aligned.toJson()
         val parsed = TrackAnalysis.fromJson(json)!!
-        assertEquals(period, parsed.periodSec, 1e-12)
-        assertEquals(105f, parsed.bpm, 1e-3f)
+        assertEquals(60.0 / aligned.bpm, parsed.periodSec, 1e-6)
+        assertEquals(aligned.bpm, parsed.bpm, 1e-3f)
         assertEquals(aligned.beats.size, parsed.beats.size)
         assertEquals(0.0, parsed.downbeatOffset, 0.0)
     }

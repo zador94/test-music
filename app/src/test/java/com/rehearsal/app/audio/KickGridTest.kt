@@ -59,7 +59,7 @@ class KickGridTest {
         val hopUs = (KickGrid.HOP * 1_000_000L) / 44100L
         assertTrue("integer 105 must drift vs 104.6, drift=$driftUs hop=$hopUs", driftUs > hopUs)
         assertTrue(trueInterval > intInterval)
-        assertEquals(104.6f, PlaybackMath.committedOriginalBpm(104.63f), 0.01f)
+        assertEquals(104.63f, PlaybackMath.committedOriginalBpm(104.63f), 0.001f)
         assertTrue(
             "toInt 105 would be the drifting grid",
             104.63f.toInt() == 104 || 104.63f.toInt() == 105,
@@ -81,6 +81,7 @@ class KickGridTest {
         assertEquals(0.08, parsed.kickPhaseSec, 1e-6)
         assertEquals(KickGrid.VERSION, parsed.kickGridVersion)
         assertTrue(!KickGrid.needsRefresh(parsed))
+        assertTrue(!KickGrid.needsBeatTrack(parsed))
     }
 
     @Test
@@ -102,6 +103,11 @@ class KickGridTest {
         assertTrue(KickGrid.needsRefresh(null))
         val stamped = parsed.copy(kickGridVersion = KickGrid.VERSION)
         assertTrue(!KickGrid.needsRefresh(stamped))
+        assertTrue("one beat is not a playable grid", KickGrid.needsBeatTrack(stamped))
+        assertTrue(KickGrid.needsBeatTrack(null))
+        assertTrue(
+            !KickGrid.needsBeatTrack(stamped.copy(beats = doubleArrayOf(0.23, 0.80))),
+        )
     }
 
     @Test
@@ -123,13 +129,8 @@ class KickGridTest {
         assertEquals(KickGrid.VERSION, refined.kickGridVersion)
         assertTrue(!KickGrid.needsRefresh(refined))
         assertEquals("drums must not pick BPM", 120f, refined.bpm, 1e-3f)
-        assertEquals(period, refined.periodSec, 1e-12)
-        assertEquals(
-            "empty beats[]: refine must not replace the grid with one drums phase",
-            0.4,
-            refined.phaseSec,
-            0.0,
-        )
+        assertEquals(60.0 / 120.0, refined.periodSec, 1e-9)
+        assertTrue("one phase fills an even grid", refined.beats.size >= 4)
         assertEquals(refined.phaseSec, refined.kickPhaseSec, 1e-12)
     }
 

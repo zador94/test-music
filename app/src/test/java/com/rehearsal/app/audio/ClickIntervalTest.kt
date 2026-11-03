@@ -29,19 +29,19 @@ class ClickIntervalTest {
     fun displayedTenthNotInteger105() {
         val ols = 104.63f
         val grid = PlaybackMath.committedOriginalBpm(ols)
-        assertEquals("UI shows one decimal", 104.6f, grid, 0.01f)
+        assertEquals("UI keeps the hundredth", 104.63f, grid, 0.001f)
         val engine = engine(grid)
         val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 8)
-        assertInterval(104.6f, intervals)
+        assertInterval(104.63f, intervals)
         val integerInterval = BeatClock.intervalUs(105f)
         val shownInterval = BeatClock.intervalUs(grid)
         assertTrue(
-            "integer 105 would rush vs 104.6 (${integerInterval}us < ${shownInterval}us)",
+            "integer 105 would rush vs 104.63 (${integerInterval}us < ${shownInterval}us)",
             integerInterval < shownInterval,
         )
         intervals.forEach { actual ->
             assertTrue(
-                "click $actual us must follow 104.6, not integer 105",
+                "click $actual us must follow 104.63, not integer 105",
                 abs(actual - integerInterval) > abs(actual - shownInterval),
             )
         }
@@ -105,7 +105,7 @@ class ClickIntervalTest {
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = grid,
-                beats = DoubleArray(0),
+                beats = TrackAnalysis.quarterBeats(period, beats.last() + period, 0.0),
                 downbeatOffset = 0.0,
                 duration = beats.last() + period,
                 periodSec = period,
@@ -152,6 +152,7 @@ class ClickIntervalTest {
         )
         engine.originalBpm = originalBpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(originalBpm))
         return engine
     }
 

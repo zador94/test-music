@@ -271,11 +271,13 @@ class ClickPipeOffsetTest {
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = BPM,
-                beats = DoubleArray(0),
+                beats = TrackAnalysis.quarterBeats(60.0 / BPM, 20.0, phaseSec),
                 downbeatOffset = phaseSec,
                 duration = 20.0,
                 sampleRate = 44100,
                 kickPhaseSec = phaseSec,
+                periodSec = 60.0 / BPM,
+                phaseSec = phaseSec,
             ),
         )
         engine.enabled = enabled

@@ -78,7 +78,7 @@ class KickGridEarlyClickTest {
                 "errClick=${errClick * 1000}ms errBody=${errBody * 1000}ms",
             errClick <= hop + 0.020 && errClick < errBody,
         )
-        assertEquals(12, KickGrid.VERSION)
+        assertEquals(15, KickGrid.VERSION)
     }
 
     @Test
@@ -155,7 +155,7 @@ class KickGridEarlyClickTest {
             kickGridVersion = 3,
         )
         assertTrue(KickGrid.needsRefresh(stale))
-        assertEquals(12, KickGrid.VERSION)
+        assertEquals(15, KickGrid.VERSION)
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 4)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 5)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 6)))
@@ -164,7 +164,44 @@ class KickGridEarlyClickTest {
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 9)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 10)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 11)))
-        assertTrue(!KickGrid.needsRefresh(stale.copy(kickGridVersion = 12)))
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 12)))
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 13)))
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 14)))
+        assertTrue(!KickGrid.needsRefresh(stale.copy(kickGridVersion = 15)))
+        assertTrue(
+            "v12 with a playable step must not re-decode on open",
+            !KickGrid.needsBeatTrack(stale.copy(kickGridVersion = 12, beats = doubleArrayOf(0.0, 0.5))),
+        )
+        assertTrue(
+            "v13 with empty beats and no period must rerun, not stamp silence",
+            KickGrid.needsBeatTrack(stale.copy(kickGridVersion = 13, beats = DoubleArray(0))),
+        )
+        assertTrue(
+            "v13 with a playable step must not re-decode on open",
+            !KickGrid.needsBeatTrack(
+                stale.copy(kickGridVersion = 13, beats = doubleArrayOf(0.0, 0.58, 1.16)),
+            ),
+        )
+        assertTrue(
+            "v14 with a saved period must not re-decode: the click already uses that tempo",
+            !KickGrid.needsBeatTrack(
+                stale.copy(
+                    kickGridVersion = 14,
+                    periodSec = 60.0 / 105.0,
+                    beats = doubleArrayOf(0.0, 0.58, 1.16),
+                ),
+            ),
+        )
+        assertTrue(
+            "v13 seconds-as-µs must rerun Stembeat, not stay silent",
+            KickGrid.needsBeatTrack(
+                stale.copy(
+                    kickGridVersion = 13,
+                    periodSec = 0.5,
+                    beats = doubleArrayOf(0.0, 1e-6, 2e-6, 3e-6),
+                ),
+            ),
+        )
     }
 
     companion object {

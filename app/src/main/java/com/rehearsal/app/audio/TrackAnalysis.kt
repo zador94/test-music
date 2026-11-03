@@ -39,6 +39,11 @@ data class TrackAnalysis(
 
     fun beatTimesUs(): LongArray = BeatClock.beatTimesUs(beats)
 
+    fun withQuarterBeats(): TrackAnalysis {
+        val period = clickPeriodSec()
+        return copy(beats = quarterBeats(period, duration, clickPhaseSec()))
+    }
+
     fun toJson(): String {
         val beatsBody = if (beats.isEmpty()) {
             ""
@@ -81,21 +86,48 @@ data class TrackAnalysis(
             val sr = sampleRate.coerceAtLeast(1)
             val duration = samples.toDouble() / sr
             val period = 60.0 / bpm.toDouble().coerceAtLeast(1.0)
-            val beats = ArrayList<Double>()
-            var t = 0.0
-            while (t < duration - 1e-9) {
-                beats.add(t)
-                t += period
-            }
             return TrackAnalysis(
                 bpm = bpm,
-                beats = beats.toDoubleArray(),
+                beats = quarterBeats(period, duration, 0.0),
                 downbeatOffset = 0.0,
                 duration = duration,
                 sampleRate = sr,
                 kickPhaseSec = 0.0,
                 periodSec = period,
                 phaseSec = 0.0,
+            )
+        }
+
+        /** Равные четверти только для тестов плеера. Плеер Stembeat так не рисует. */
+        fun quarterBeats(periodSec: Double, duration: Double, phaseSec: Double = 0.0): DoubleArray {
+            if (periodSec <= 1e-9 || duration <= 0.0) return DoubleArray(0)
+            val out = ArrayList<Double>((duration / periodSec).toInt() + 4)
+            var t = phaseSec
+            if (t > periodSec * 0.5) t -= periodSec
+            while (t < duration - 1e-9) {
+                if (t >= -0.04) out.add(t.coerceAtLeast(0.0))
+                t += periodSec
+            }
+            return out.toDoubleArray()
+        }
+
+        fun grid(
+            bpm: Float,
+            duration: Double = 16.0,
+            phaseSec: Double = 0.0,
+            periodSec: Double = 0.0,
+            sampleRate: Int = TempoDetector.SAMPLE_RATE,
+        ): TrackAnalysis {
+            val period = if (periodSec > 1e-9) periodSec else 60.0 / bpm.toDouble().coerceAtLeast(1.0)
+            return TrackAnalysis(
+                bpm = bpm,
+                beats = quarterBeats(period, duration, phaseSec),
+                downbeatOffset = 0.0,
+                duration = duration,
+                sampleRate = sampleRate,
+                kickPhaseSec = phaseSec,
+                periodSec = period,
+                phaseSec = phaseSec,
             )
         }
 

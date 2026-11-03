@@ -13,12 +13,12 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Разбор ударных. BPM и `periodSec` клика — [TrackTempo] по миксу.
- * [alignPhase]/[refine] → [DrumPhase.align]: snap `beats[]` к миксу,
- * не новая сетка из одного drums `phaseSec`. VERSION не поднимаем.
+ * Разбор ударных. BPM клика — число в поле темпа, шаг `60 / bpm`.
+ * [alignPhase]/[refine] → [DrumPhase.align]: одна фаза на весь трек
+ * и ровные четверти. Соседние удары сетку не двигают.
  */
 object KickGrid {
-    const val VERSION = 12
+    const val VERSION = 15
     const val HOP = TempoDetector.HOP
     const val LOWPASS_HZ = 150.0
     const val MID_LOW_HZ = 100.0
@@ -110,6 +110,29 @@ object KickGrid {
 
     fun needsRefresh(analysis: TrackAnalysis?): Boolean =
         analysis == null || analysis.kickGridVersion < VERSION
+
+    /**
+     * Нужен полный разбор файла: разбора нет, долей нет, или шаг не похож на темп.
+     * Старая версия линейки сама по себе файл не декодирует. Список песен
+     * вызывает это на каждую дорожку; MediaCodec и весь микс в памяти во время
+     * проигрывания глушат музыку. Ровный клик берёт цифру темпа и одну фазу
+     * из уже сохранённого разбора. Заново считать — только кнопка.
+     */
+    fun needsBeatTrack(analysis: TrackAnalysis?): Boolean {
+        if (analysis == null) return true
+        if (analysis.beats.size < 2 && !analysis.hasClickPeriod()) return true
+        val interval = if (analysis.hasClickPeriod()) {
+            BeatClock.intervalFromPeriodSec(analysis.periodSec)
+        } else {
+            BeatClock.intervalUs(analysis.bpm)
+        }
+        if (analysis.beats.size >= 2 &&
+            !BeatClock.isPlausibleClickGrid(analysis.beatTimesUs(), interval)
+        ) {
+            return true
+        }
+        return false
+    }
 
     private class DrumOnsets(
         val sampleRate: Int,

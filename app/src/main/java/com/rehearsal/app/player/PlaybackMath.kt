@@ -54,7 +54,7 @@ object PlaybackMath {
     }
 
     fun sanitizeBpmDraft(raw: String): String {
-        val out = StringBuilder(5)
+        val out = StringBuilder(6)
         var seenDot = false
         for (c in raw) {
             when {
@@ -64,7 +64,7 @@ object PlaybackMath {
                     seenDot = true
                 }
             }
-            if (out.length >= 5) break
+            if (out.length >= 6) break
         }
         return out.toString()
     }
@@ -75,14 +75,19 @@ object PlaybackMath {
         return OriginalBpmCommit(applyBpm = parsed, displayText = display)
     }
 
-    fun roundToTenth(bpm: Float): Float {
+    fun roundToTenth(bpm: Float): Float = roundToStep(bpm, 10f)
+
+    /** Сотая. Десятая (105.2 вместо 104.96) за минуту уводит клик с бочки. */
+    fun roundToHundredth(bpm: Float): Float = roundToStep(bpm, 100f)
+
+    private fun roundToStep(bpm: Float, scale: Float): Float {
         if (!bpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM
         val clamped = bpm.coerceIn(MetronomeClickEngine.MIN_BPM, MetronomeClickEngine.MAX_BPM)
-        return round(clamped * 10f) / 10f
+        return round(clamped * scale) / scale
     }
 
     fun formatOriginalBpm(bpm: Float): String =
-        String.format(Locale.US, "%.1f", committedOriginalBpm(bpm))
+        String.format(Locale.US, "%.2f", committedOriginalBpm(bpm))
 
     fun displayedMetronomeBpm(bpm: Float): Int {
         if (!bpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM.roundToInt()
@@ -93,12 +98,12 @@ object PlaybackMath {
     }
 
     /**
-     * Подпись и поле оригинала: одно десятичное, не `toInt`.
-     * Шаг клика — `periodSec` из analysis.json, не `60 /` это значение.
+     * Подпись и поле оригинала: две цифры после точки, не `toInt` и не одна десятая.
+     * Шаг клика — `60 /` это же число.
      */
     fun committedOriginalBpm(originalBpm: Float): Float {
         if (!originalBpm.isFinite()) return MetronomeClickEngine.DEFAULT_BPM
-        return roundToTenth(originalBpm)
+        return roundToHundredth(originalBpm)
     }
 }
 

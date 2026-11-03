@@ -1,5 +1,6 @@
 package com.rehearsal.app.audio
 
+import com.rehearsal.app.player.PlaybackMath
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -9,12 +10,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * После [TempoDetector]: не переписывает весь [TrackAnalysis.beats] одним
- * `phaseSec`. BPM не считает, 150→75 не складывает, [TrackTempo] не трогает.
- * Клик в плеере читает `beats[]`, не эту фазу.
- *
- * 0.3.42: каждую уже найденную долю тянет к онсету **микса** (±12% периода),
- * не к телу drums.wav. [periodSec]/[bpm] не меняет. Origin — первая доля.
+ * После [TempoDetector]: одна фаза на весь трек и ровные четверти
+ * `phase + n * (60 / bpm)`. BPM не считает и не складывает 150→75.
+ * Каждую долю к соседнему удару не тянет — из-за этого клик уезжал.
  */
 object DrumPhase {
     /** Атака бочки до тела, которое Demucs часто сажает на ~0.3 с позже. */
@@ -24,6 +22,10 @@ object DrumPhase {
     private const val MIX_AVOID_SEC = 0.10
     private const val BEATER_MAX_MAD_SEC = 0.040
     private const val BEATER_MIN_FRACTION = 0.45
+    /** Пик атаки позже её фронта, но это всё ещё тот же удар, не соседний. */
+    private const val ATTACK_PEAK_AFTER_RISE_SEC = 0.070
+    /** Спад после вершины. Центр этого куска — то, что слышно как удар. */
+    private const val ATTACK_BODY_SEC = 0.045
     /** Позже hop STFT, не зашитые 200 мс. Верх — доля периода. */
     private const val DEMUCS_LAG_MIN_SEC = 0.060
     private const val DEMUCS_LAG_MAX_SEC = 0.45
@@ -80,44 +82,52 @@ object DrumPhase {
     }
 
     /**
-     * Не переписывает весь [TrackAnalysis.beats] одним phaseSec.
-     * [periodSec]/[bpm] микса не меняет. Если есть mix — каждую долю
-     * тянет к онсету микса (±12% периода), не к телу drums.wav.
+     * Одна фаза по миксу (если он есть) или по ударным, затем ровная сетка.
+     * Тихий файл фазу не обнуляет. Темп — пульс в узком окне вокруг уже
+     * известной цифры, до сотой. Далеко (октава, другой грув) цифру не переписывает.
      */
     fun align(
         existing: TrackAnalysis,
         drums: StereoPcm,
         mix: StereoPcm? = null,
     ): TrackAnalysis {
-        val period = if (existing.hasClickPeriod()) {
-            existing.periodSec
-        } else {
-            existing.clickPeriodSec()
-        }
-        val beats = try {
-            if (mix != null && existing.beats.isNotEmpty()) {
-                snapBeatsToMix(existing.beats, mix, period)
-            } else {
-                existing.beats
-            }
+        val source = if (mix != null && mix.samples > 0) mix else drums
+        val pulse = try {
+            PulseTempo.grid(source, existing.bpm)
         } catch (_: Throwable) {
-            existing.beats
+            null
         }
-        val originAbs = beats.firstOrNull()
-        val origin = if (originAbs != null && period > 1e-9) {
-            positiveMod(originAbs, period)
-        } else {
-            existing.phaseSec
+        val bpm = pulse?.bpm ?: PlaybackMath.committedOriginalBpm(existing.bpm)
+        val period = 60.0 / bpm.toDouble().coerceAtLeast(1.0)
+        val measured = pulse?.phaseSec ?: try {
+            phaseInPeriod(source, period)
+        } catch (_: Throwable) {
+            existing.clickPhaseSec()
         }
+        val phase = positiveMod(
+            if (measured == 0.0 && abs(existing.clickPhaseSec()) > 1e-6 && !hasLowEnergy(source)) {
+                existing.clickPhaseSec()
+            } else {
+                measured
+            },
+            period,
+        )
         return existing.copy(
-            beats = beats,
-            kickPhaseSec = origin,
-            phaseSec = origin,
+            bpm = bpm,
+            periodSec = period,
+            phaseSec = phase,
+            kickPhaseSec = phase,
+            beats = TrackAnalysis.quarterBeats(period, existing.duration, phase),
             downbeatOffset = 0.0,
             kickGridVersion = KickGrid.VERSION,
-            periodSec = existing.periodSec,
-            bpm = existing.bpm,
         )
+    }
+
+    private fun hasLowEnergy(pcm: StereoPcm): Boolean {
+        val energy = KickGrid.lowBandEnergy(pcm, KickGrid.HOP, KickGrid.LOWPASS_HZ)
+        var peak = 0f
+        for (v in energy) if (v > peak) peak = v
+        return peak >= 1e-8f
     }
 
     internal fun snapBeatsToMix(
@@ -135,6 +145,7 @@ object DrumPhase {
             KickGrid.HOP,
             sr,
             duration,
+            chainFromPeriod = false,
         )
     }
 
@@ -155,6 +166,108 @@ object DrumPhase {
         val maxBack = (period / hopSec * 0.75).roundToInt().coerceAtLeast(2)
         val start = onsetStartIndex(energy, peak, maxBack)
         return positiveMod(KickGrid.hopCenterSec(start, hop, sr), period)
+    }
+
+    /**
+     * Фаза клика: тело берётся с ударных, а если атака в остальных дорожках
+     * стабильно раньше этого тела — клик на атаку. Лаг измеряется, не константа.
+     */
+    fun phaseOnHeardAttack(
+        drumsLow: FloatArray,
+        heard: FloatArray,
+        sampleRate: Int,
+        hintBpm: Float,
+    ): PulseGrid? {
+        val pulse = PulseTempo.gridFromEnergy(drumsLow, sampleRate, PulseTempo.HOP, hintBpm) ?: return null
+        val period = 60.0 / pulse.bpm.toDouble().coerceAtLeast(1.0)
+        val lag = earliestAttackLead(heard, sampleRate, PulseTempo.HOP, period, pulse.phaseSec) ?: 0.0
+        return PulseGrid(pulse.bpm, positiveMod(pulse.phaseSec - lag, period))
+    }
+
+    /**
+     * Самая ранняя устойчивая атака до тела ударных.
+     * Время — центр спада после вершины, не фронт и не сам пик:
+     * вершина слышна раньше удара.
+     * Null — устойчивой атаки нет. Число в код не зашито.
+     */
+    internal fun earliestAttackLead(
+        heard: FloatArray,
+        sampleRate: Int,
+        hop: Int,
+        periodSec: Double,
+        bodyPhaseSec: Double,
+    ): Double? {
+        if (heard.size < 32 || !bodyPhaseSec.isFinite()) return null
+        val period = periodSec.coerceAtLeast(1e-9)
+        val hopSec = hop.toDouble() / sampleRate.coerceAtLeast(1)
+        val minLag = DEMUCS_LAG_MIN_SEC
+        val maxLag = min(0.25, period * 0.45)
+        if (maxLag <= minLag + hopSec) return null
+        val flux = KickGrid.fluxOf(heard)
+        val duration = min(heard.size, flux.size) * hopSec
+        val last = min(heard.lastIndex, flux.lastIndex)
+        val peakHops = (ATTACK_PEAK_AFTER_RISE_SEC / hopSec).toInt().coerceAtLeast(1)
+        val leads = ArrayList<Double>()
+        var examined = 0
+        var t = positiveMod(bodyPhaseSec, period)
+        if (t < maxLag) t += period
+        while (t + hopSec < duration) {
+            examined++
+            val from = KickGrid.hopIndexAt(t - maxLag, hopSec, last)
+            val to = KickGrid.hopIndexAt(t - minLag, hopSec, last)
+            if (to > from) {
+                var win = 1e-8f
+                for (k in from..to) if (flux[k] > win) win = flux[k]
+                val thresh = win * 0.40f
+                var rise = -1
+                for (k in from..to) {
+                    val v = flux[k]
+                    if (v < thresh) continue
+                    if (v < flux.getOrElse(k - 1) { 0f } || v < flux.getOrElse(k + 1) { 0f }) continue
+                    rise = k
+                    break
+                }
+                if (rise >= 0) {
+                    val peakEnd = (rise + peakHops).coerceAtMost(last)
+                    var peak = rise
+                    for (k in rise..peakEnd) {
+                        if (heard[k] > heard[peak]) peak = k
+                    }
+                    val center = attackCenterHop(heard, peak, last, hopSec)
+                    val lead = t - (center + 0.5) * hopSec
+                    if (lead >= minLag - ATTACK_PEAK_AFTER_RISE_SEC - ATTACK_BODY_SEC && lead <= maxLag + hopSec) {
+                        leads.add(lead)
+                    }
+                }
+            }
+            t += period
+        }
+        if (examined < 8 || leads.size < 8) return null
+        if (leads.size.toDouble() / examined < DEMUCS_LAG_MIN_FRACTION) return null
+        val values = leads.toDoubleArray()
+        val med = median(values)
+        if (mad(values, med) > DEMUCS_LAG_MAD_SEC) return null
+        if (med < minLag - ATTACK_PEAK_AFTER_RISE_SEC - ATTACK_BODY_SEC || med > maxLag) return null
+        return med
+    }
+
+    /** Центр тяжести атаки после пика: спад слышен позже самой вершины. */
+    private fun attackCenterHop(heard: FloatArray, peak: Int, last: Int, hopSec: Double): Double {
+        val cap = (peak + (ATTACK_BODY_SEC / hopSec).toInt().coerceAtLeast(1)).coerceAtMost(last)
+        val floor = heard[peak] * 0.50f
+        var weight = 0.0
+        var moment = 0.0
+        var k = peak
+        while (k <= cap) {
+            val w = heard[k].toDouble()
+            if (k > peak && w < floor) break
+            if (w > 0.0) {
+                weight += w
+                moment += w * k
+            }
+            k++
+        }
+        return if (weight > 0.0) moment / weight else peak.toDouble()
     }
 
     /**

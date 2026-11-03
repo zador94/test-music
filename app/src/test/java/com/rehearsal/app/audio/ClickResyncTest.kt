@@ -94,6 +94,7 @@ class ClickResyncTest {
         engine.configure(pcm16())
         engine.originalBpm = originalBpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(originalBpm))
         return engine
     }
 

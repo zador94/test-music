@@ -95,11 +95,13 @@ class KickOffsetDiagnosisTest {
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = 105f,
-                beats = DoubleArray(0),
-                downbeatOffset = kickAt,
+                beats = TrackAnalysis.quarterBeats(60.0 / 105.0, pcm.samples.toDouble() / sr, kickAt),
+                downbeatOffset = 0.0,
                 duration = pcm.samples.toDouble() / sr,
                 sampleRate = sr,
                 kickPhaseSec = kickAt,
+                periodSec = 60.0 / 105.0,
+                phaseSec = kickAt,
             ),
         )
         engine.enabled = false
@@ -155,11 +157,17 @@ class KickOffsetDiagnosisTest {
         engine.setAnalysis(
             TrackAnalysis(
                 bpm = analyzed.bpm,
-                beats = DoubleArray(0),
-                downbeatOffset = analyzed.kickPhaseSec,
+                beats = TrackAnalysis.quarterBeats(
+                    60.0 / analyzed.bpm,
+                    pcm.samples.toDouble() / sr,
+                    analyzed.kickPhaseSec,
+                ),
+                downbeatOffset = 0.0,
                 duration = pcm.samples.toDouble() / sr,
                 sampleRate = sr,
                 kickPhaseSec = analyzed.kickPhaseSec,
+                periodSec = 60.0 / analyzed.bpm,
+                phaseSec = analyzed.kickPhaseSec,
             ),
         )
         engine.enabled = true
@@ -198,6 +206,7 @@ class KickOffsetDiagnosisTest {
         )
         engine.originalBpm = bpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(bpm))
         return engine
     }
 

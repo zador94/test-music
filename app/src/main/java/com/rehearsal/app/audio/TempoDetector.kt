@@ -1,57 +1,21 @@
 package com.rehearsal.app.audio
 
-import com.rehearsal.app.data.SplitKind
-import com.rehearsal.app.player.PlaybackMath
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * BPM (подпись 0.1) + `periodSec` по 44.1 stereo PCM через [TrackTempo]
- * (`tempoOfTrack` по миксу). `beats[]` — черновая сетка phase+n*period,
- * каждая доля притянута к novelty. KickGrid.refine не вызываем.
+ * BPM + `beats[]` по Stembeat: onset_strength + beat_track tightness 100.
+ * Не линейка TrackTempo `phase+n*period`. KickGrid.refine / DrumPhase не трогаем.
  */
 object TempoDetector {
     const val SAMPLE_RATE = 44100
-    const val HOP = 512
+    const val HOP = Stembeat.HOP
     /** Окно snap доли к атаке: ±12% периода, не фиксированные ±40 мс. */
     const val SNAP_WINDOW_PERIOD = 0.12
 
-    fun analyze(pcm: StereoPcm): TrackAnalysis {
-        val sr = pcm.sampleRate.coerceAtLeast(1)
-        val samples = pcm.samples
-        val duration = samples.toDouble() / sr
-        if (samples < sr / 2) {
-            return TrackAnalysis.fallbackGrid(samples, sr)
-        }
-        val tracked = TrackTempo.tempoOfTrack(pcm)
-        val period = tracked.periodSec
-        val phase = tracked.phaseSec
-        val nov = novelty(pcm, HOP)
-        val (beats, _) = trackBeats(
-            novelty = nov,
-            bpm = tracked.bpm,
-            duration = duration,
-            hop = HOP,
-            sampleRate = sr,
-            phaseSec = phase,
-            periodSec = period,
-        )
-        return TrackAnalysis(
-            bpm = PlaybackMath.roundToTenth(tracked.bpm.toFloat()),
-            beats = beats,
-            downbeatOffset = 0.0,
-            timeSignature = intArrayOf(4, 4),
-            duration = duration,
-            sampleRate = sr,
-            separator = SplitKind.HTDEMUCS_4STEM,
-            stems = TrackAnalysis.DEFAULT_STEMS,
-            kickPhaseSec = phase,
-            periodSec = period,
-            phaseSec = phase,
-        )
-    }
+    fun analyze(pcm: StereoPcm): TrackAnalysis = Stembeat.analyze(pcm)
 
     internal fun novelty(pcm: StereoPcm, hop: Int): FloatArray {
         val n = pcm.samples
@@ -181,8 +145,11 @@ object TempoDetector {
 
     /**
      * Каждую долю тянет к ближайшему novelty в ±[SNAP_WINDOW_PERIOD]*period.
-     * Следующая точка — от уже притянутой, шаг [periodSec], иначе дрифт
-     * 120→116 уезжает за окно неподвижной линейки. Нет онсета — точка решётки.
+     * [chainFromPeriod]: черновая линейка `phase+n*period` — следующая точка
+     * от уже притянутой, иначе дрифт 120→116 уезжает из окна. Для готовых
+     * `beats[]` Stembeat это выключено: шаг period затирает свою метку и
+     * после одного промаха клик едет мимо бочки до конца песни.
+     * Нет онсета — исходная точка.
      */
     internal fun snapTimesToNovelty(
         times: DoubleArray,
@@ -191,6 +158,7 @@ object TempoDetector {
         hop: Int,
         sampleRate: Int,
         duration: Double,
+        chainFromPeriod: Boolean = true,
     ): DoubleArray {
         if (times.isEmpty() || novelty.isEmpty() || periodSec <= 1e-9) return times
         val sr = sampleRate.coerceAtLeast(1)
@@ -201,7 +169,7 @@ object TempoDetector {
         val out = ArrayList<Double>(times.size)
         var last = Double.NaN
         for (t0 in times) {
-            val predicted = if (last.isFinite()) last + periodSec else t0
+            val predicted = if (chainFromPeriod && last.isFinite()) last + periodSec else t0
             val snapped = snapOneToNovelty(
                 predicted,
                 novelty,

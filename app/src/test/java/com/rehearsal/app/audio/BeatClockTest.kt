@@ -149,6 +149,81 @@ class BeatClockTest {
             !BeatClock.isPlausibleClickGrid(secondsAsLong, 500_000L),
         )
         assertEquals(Long.MAX_VALUE, BeatClock.firstOverlappingBeat(secondsAsLong, 1_200_000L, 6_000L))
+        val integerSeconds = BeatClock.beatTimesUs(doubleArrayOf(0.0, 1.0, 2.0, 3.0))
+        assertEquals(1_000_000L, integerSeconds[1])
+        assertEquals(2_000_000L, integerSeconds[2])
+        val alreadyUs = BeatClock.beatTimesUs(doubleArrayOf(0.0, 500_000.0, 1_000_000.0, 1_500_000.0))
+        assertEquals(500_000L, alreadyUs[1])
+        assertEquals(1_000_000L, alreadyUs[2])
+        val truncatedUs = BeatClock.beatTimesUs(doubleArrayOf(0.0, 1e-6, 2e-6, 3e-6))
+        assertEquals(0L, truncatedUs[0])
+        assertEquals(1L, truncatedUs[1])
+        assertTrue(!BeatClock.isPlausibleClickGrid(truncatedUs, 500_000L))
+    }
+
+    @Test
+    fun straightenDropsAStuckEarlyPhase() {
+        val period = 500_000L
+        val raw = LongArray(16) { it * period }
+        for (i in 5 until raw.size) raw[i] -= 150_000L
+        val out = BeatClock.straightenQuarters(raw)
+        val late = out[10]
+        assertTrue(
+            "click must not stay 150ms early after one short step, was $late",
+            kotlin.math.abs(late - 10 * period) < 20_000L,
+        )
+    }
+
+    @Test
+    fun straightenKeepsSlowTempoDrift() {
+        val beats = LongArray(32)
+        var t = 0L
+        var step = 500_000.0
+        for (i in beats.indices) {
+            beats[i] = t
+            step += 2_000.0
+            t += step.toLong()
+        }
+        val out = BeatClock.straightenQuarters(beats)
+        val lastStep = out[out.lastIndex] - out[out.lastIndex - 1]
+        val rawLast = beats[beats.lastIndex] - beats[beats.lastIndex - 1]
+        assertTrue(
+            "drifted step $rawLast must survive, got $lastStep",
+            kotlin.math.abs(lastStep - rawLast) < 15_000L,
+        )
+    }
+
+    @Test
+    fun straightenLeavesEvenQuartersUntouched() {
+        val period = 568_889L
+        val raw = LongArray(24) { it * period }
+        val out = BeatClock.straightenQuarters(raw)
+        for (i in raw.indices) assertEquals(raw[i], out[i])
+    }
+
+    @Test
+    fun extendClickBeatsKeepsBodyAndFillsTheEndsFromMeanStep() {
+        val step = 588_235L
+        val first = 12_724_535L
+        val inside = LongArray(5) { i -> first + i * step }
+        val durationUs = 20_000_000L
+        val extended = BeatClock.extendClickBeats(inside, durationUs)
+        assertTrue(extended.size > inside.size)
+        for (t in inside) {
+            assertTrue("body beat $t dropped", extended.any { kotlin.math.abs(it - t) <= 1L })
+        }
+        val intro = extended.first()
+        assertTrue("intro should continue the 588ms step, was $intro", kotlin.math.abs(intro - (first % step)) < 2_000L)
+        assertTrue(extended.last() <= durationUs)
+        assertTrue(durationUs - extended.last() < step)
+    }
+
+    @Test
+    fun extendClickBeatsIgnoresMarksOutsideTheSong() {
+        val hours = longArrayOf(3_600_000_000L, 3_600_500_000L, 3_601_000_000L)
+        val same = BeatClock.extendClickBeats(hours, 8_000_000L)
+        assertEquals(hours.size, same.size)
+        assertEquals(hours[0], same[0])
     }
 
     @Test

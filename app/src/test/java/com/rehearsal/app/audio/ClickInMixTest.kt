@@ -177,6 +177,7 @@ class ClickInMixTest {
         )
         engine.originalBpm = 120f
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         assertTrue("0.3.8 trap: AAC mime must still be treated as PCM at the sink", engine.isPcm())
         val pipe = MetronomePcmPipe(engine)
         pipe.configure(
@@ -237,6 +238,7 @@ class ClickInMixTest {
         engine.configure(pcm16Format())
         engine.originalBpm = 120f
         engine.enabled = enabled
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         return engine
     }
 

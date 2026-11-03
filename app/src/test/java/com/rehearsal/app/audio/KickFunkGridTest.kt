@@ -84,7 +84,8 @@ class KickFunkGridTest {
             kickGridVersion = 1,
         )
         assertTrue(KickGrid.needsRefresh(stale))
-        assertEquals(12, KickGrid.VERSION)
+        assertEquals(15, KickGrid.VERSION)
+        assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 12)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 2)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 3)))
         assertTrue(KickGrid.needsRefresh(stale.copy(kickGridVersion = 4)))

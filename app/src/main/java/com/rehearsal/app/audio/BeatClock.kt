@@ -1,8 +1,10 @@
 package com.rehearsal.app.audio
 
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.roundToLong
 import kotlin.math.sin
 
@@ -158,7 +160,7 @@ object BeatClock {
     /**
      * Есть ли доля в окне буфера ± один период. Если `beats[]` в другой
      * шкале, чем PTS стемов, ни один 23 мс chunk её не содержит — тогда
-     * [MetronomeClickEngine] должен снова красить равную решётку.
+     * [MetronomeClickEngine.mixInto] красит равную решётку, а не тишину.
      */
     fun hasBeatNear(
         timesUs: LongArray,
@@ -214,6 +216,85 @@ object BeatClock {
         if (median < MIN_BEAT_STEP_US) return false
         val interval = intervalUs.coerceAtLeast(1L)
         return median >= interval / 4L && median <= interval * 4L
+    }
+
+    /**
+     * Шаг, который отличается от соседних четвертей больше чем на ~40 мс
+     * (или 8% периода), заменяется локальной медианой. Одна сорвавшаяся
+     * доля больше не сдвигает все следующие клики. Медленный уход темпа,
+     * где каждый шаг рядом с соседями, остаётся.
+     */
+    fun straightenQuarters(timesUs: LongArray): LongArray {
+        if (timesUs.size < 4) return timesUs
+        val dt = LongArray(timesUs.size - 1) { i -> timesUs[i + 1] - timesUs[i] }
+        for (d in dt) if (d <= 0L) return timesUs
+        val out = LongArray(timesUs.size)
+        out[0] = timesUs[0]
+        for (i in dt.indices) {
+            val ref = localMedian(dt, i, width = 4)
+            val tol = max(40_000L, (ref * 0.08).toLong())
+            val step = if (abs(dt[i] - ref) > tol) ref else dt[i]
+            out[i + 1] = out[i] + step
+        }
+        return out
+    }
+
+    private fun localMedian(values: LongArray, index: Int, width: Int): Long {
+        val from = (index - width).coerceAtLeast(0)
+        val to = (index + width).coerceAtMost(values.lastIndex)
+        val window = LongArray(to - from + 1)
+        for (i in window.indices) window[i] = values[from + i]
+        window.sort()
+        return window[window.size / 2]
+    }
+
+    /**
+     * Доли, которые уже лежат в песне, продлевает тем же средним шагом
+     * до t=0 и до [durationUs]. Шаг — (последняя − первая) / (n − 1),
+     * не `periodSec`: у 102 BPM медиана хопа бывает 101.3, а сами доли
+     * идут ровно в 102. Чужие метки вне длительности не разворачиваем
+     * в сетку по всей песне.
+     */
+    fun extendClickBeats(timesUs: LongArray, durationUs: Long): LongArray {
+        if (durationUs <= 0L || timesUs.size < 2) return timesUs
+        val inside = ArrayList<Long>(timesUs.size)
+        for (t in timesUs) {
+            if (t in 0L..durationUs) inside.add(t)
+        }
+        if (inside.size < 2) return timesUs
+        val span = inside.last() - inside.first()
+        val nSteps = inside.size - 1
+        if (span <= 0L) return timesUs
+        val step = span.toDouble() / nSteps.toDouble()
+        if (step < MIN_BEAT_STEP_US || step > 2_000_000.0) return timesUs
+        val guard = (durationUs / step).toInt() + 4
+        val head = ArrayList<Long>()
+        var k = 1
+        while (k < guard) {
+            val t = inside.first() - k * step
+            if (t < -20_000.0) break
+            head.add(t.roundToLong().coerceAtLeast(0L))
+            if (t < 0.0) break
+            k++
+        }
+        head.reverse()
+        val tail = ArrayList<Long>()
+        k = 1
+        while (k < guard) {
+            val t = inside.last() + k * step
+            if (t > durationUs) break
+            tail.add(t.roundToLong())
+            k++
+        }
+        val merged = ArrayList<Long>(head.size + inside.size + tail.size)
+        merged.addAll(head)
+        merged.addAll(inside)
+        merged.addAll(tail)
+        val out = ArrayList<Long>(merged.size)
+        for (t in merged) {
+            if (out.isEmpty() || t - out.last() > 2_000L) out.add(t)
+        }
+        return out.toLongArray()
     }
 
     /** Короче 5 мс — не четверть; 10 с как число > 10000 — уже µs, не секунды. */

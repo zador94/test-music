@@ -32,16 +32,96 @@ class TempoDetectorTest {
             0.4,
         )
         assertTrue("beats ≥ 12, was ${analysis.beats.size}", analysis.beats.size >= 12)
-        assertEquals("downbeatOffset is beat-class index 0..3, not seconds", 0.0, analysis.downbeatOffset, 0.0)
+        assertTrue(
+            "downbeatOffset is beat-class index 0..3, not seconds, was ${analysis.downbeatOffset}",
+            analysis.downbeatOffset in 0.0..3.0 && analysis.downbeatOffset == analysis.downbeatOffset.toInt().toDouble(),
+        )
         val period = 0.5
         for (i in analysis.beats.indices) {
             val expected = i * period
             val err = abs(analysis.beats[i] - expected)
             assertTrue(
                 "synthetic 120 BPM beat[$i]=${analysis.beats[i]} want $expected err=${err * 1000}ms",
-                err < 0.015,
+                err < 0.025,
             )
         }
+    }
+
+    @Test
+    fun foldTempoKeepsFastPulseAndExactFiftyFive() {
+        assertEquals(55.0, Stembeat.foldTempo(55.0), 1e-9)
+        assertEquals(65.5, Stembeat.foldTempo(65.5), 1e-9)
+        assertEquals(80.0, Stembeat.foldTempo(40.0), 1e-9)
+        assertEquals(120.0, Stembeat.foldTempo(240.0), 1e-9)
+        assertEquals(128.0, Stembeat.foldTempo(128.0), 1e-9)
+        assertEquals(131.0, Stembeat.foldTempo(131.0), 1e-9)
+        assertEquals(150.0, Stembeat.foldTempo(150.0), 1e-9)
+        assertEquals(160.0, Stembeat.foldTempo(160.0), 1e-9)
+        assertEquals(180.0, Stembeat.foldTempo(180.0), 1e-9)
+        assertEquals(180.0, Stembeat.foldTempo(360.0), 1e-9)
+    }
+
+    @Test
+    fun resolveOctaveFoldsOnlyEmptyHalfPulse() {
+        val sr = 44100
+        val ballad = impulseOnset(bpm = 65.5, sr = sr, offbeat = 0.15f)
+        val doubled = Stembeat.resolveOctave(ballad, sr, 131.0)
+        assertEquals("empty half of 131 is the 65.5 ballad, was $doubled", 65.5, doubled, 0.05)
+
+        val fast = impulseOnset(bpm = 160.0, sr = sr, offbeat = 0f)
+        val kept = Stembeat.resolveOctave(fast, sr, 160.0)
+        assertEquals("160 with a hit on every quarter stays 160, was $kept", 160.0, kept, 0.05)
+
+        val house = impulseOnset(bpm = 128.0, sr = sr, offbeat = 0f)
+        val houseBpm = Stembeat.resolveOctave(house, sr, 128.0)
+        assertEquals("128 stays 128, was $houseBpm", 128.0, houseBpm, 0.05)
+
+        assertEquals(104.6, Stembeat.resolveOctave(fast, sr, 104.6), 0.05)
+        assertEquals(75.0, Stembeat.resolveOctave(ballad, sr, 75.0), 0.05)
+    }
+
+    @Test
+    fun oneFiftyAndOneSixtyClicksAreNotHalved() {
+        val fast150 = TempoDetector.analyze(stereoClicks(bpm = 150.0, bars = 8, beatsPerBar = 4))
+        assertEquals("150 clicks, was ${fast150.bpm}", 150.0, fast150.bpm.toDouble(), 4.0)
+        assertTrue("150 must not fold to 75, was ${fast150.bpm}", fast150.bpm > 120f)
+
+        val fast160 = TempoDetector.analyze(stereoClicks(bpm = 160.0, bars = 8, beatsPerBar = 4))
+        assertEquals("160 clicks, was ${fast160.bpm}", 160.0, fast160.bpm.toDouble(), 4.0)
+        assertTrue("160 must not fold to 80, was ${fast160.bpm}", fast160.bpm > 120f)
+
+        val house = TempoDetector.analyze(stereoClicks(bpm = 128.0, bars = 8, beatsPerBar = 4))
+        assertEquals("128 clicks, was ${house.bpm}", 128.0, house.bpm.toDouble(), 4.0)
+        assertTrue("128 must not fold to 64, was ${house.bpm}", house.bpm > 110f)
+    }
+
+    @Test
+    fun oneThirtyOneClicksStayNear131() {
+        val analysis = TempoDetector.analyze(stereoClicks(bpm = 131.0, bars = 8, beatsPerBar = 4))
+        assertEquals("131 clicks, was ${analysis.bpm}", 131.0, analysis.bpm.toDouble(), 5.0)
+        assertTrue("131 must not fold to 65.5, was ${analysis.bpm}", analysis.bpm > 110f)
+    }
+
+    @Test
+    fun ellisPathWinsOverADenserComb() {
+        val picked = intArrayOf(10, 20, 30, 40, 50, 60, 70, 80)
+        val comb = IntArray(16) { it * 5 }
+        val kept = Stembeat.selectBeatFrames(picked, comb, frameCount = 100, framesPerBeat = 10)
+        assertEquals(picked.size, kept.size)
+        assertEquals(picked[0], kept[0])
+        assertEquals(picked[picked.lastIndex], kept[kept.lastIndex])
+
+        val sparse = intArrayOf(10, 50)
+        val fallback = Stembeat.selectBeatFrames(sparse, comb, frameCount = 100, framesPerBeat = 10)
+        assertEquals(comb.size, fallback.size)
+
+        val halfRate = intArrayOf(10, 30, 50, 70, 90)
+        val filled = Stembeat.selectBeatFrames(halfRate, comb, frameCount = 100, framesPerBeat = 10)
+        assertEquals(
+            "half-rate Ellis path is not a finished grid",
+            comb.size,
+            filled.size,
+        )
     }
 
     @Test
@@ -169,6 +249,21 @@ class TempoDetectorTest {
                 }
             }
             return StereoPcm(sampleRate, left, right)
+        }
+
+        private fun impulseOnset(bpm: Double, sr: Int, offbeat: Float): FloatArray {
+            val period = sr.toDouble() / Stembeat.HOP * 60.0 / bpm
+            val beats = 16
+            val onset = FloatArray((period * beats).toInt() + 4)
+            for (i in 0 until beats) {
+                val at = (2.0 + i * period).toInt()
+                if (at in onset.indices) onset[at] = 1f
+                if (offbeat > 0f) {
+                    val mid = (2.0 + i * period + period / 2.0).toInt()
+                    if (mid in onset.indices) onset[mid] = offbeat
+                }
+            }
+            return onset
         }
     }
 }

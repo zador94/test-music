@@ -32,7 +32,7 @@ data class PlayerUi(
     val playing: Boolean = false,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
-    val originalBpmText: String = "120.0",
+    val originalBpmText: String = "120.00",
     val originalBpm: Float = MetronomeClickEngine.DEFAULT_BPM,
     val metronomeBpm: Float = 120f,
     val metronomeOn: Boolean = false,
@@ -86,7 +86,7 @@ class PlayerViewModel(
                     bpmInitialized = true
                 } else {
                     val current = _ui.value.originalBpm
-                    if (abs(bpm - current) > 0.05f) {
+                    if (abs(bpm - current) > 0.005f) {
                         val followMetronome = abs(_ui.value.metronomeBpm - current) < 0.51f
                         playback.setOriginalBpm(bpm)
                         if (followMetronome) playback.setMetronomeBpm(bpm)
@@ -242,12 +242,16 @@ class PlayerViewModel(
     }
 
     private suspend fun refreshKickGrid(force: Boolean) {
-        val analysis = app.repository.refreshKickGrid(trackId, force) ?: return
+        val analysis = if (force) {
+            app.repository.refreshKickGrid(trackId, true)
+        } else {
+            app.repository.refinePulseTempo(trackId)
+        } ?: return
         playback.applyKickGrid(analysis)
         if (userOverrodeOriginalBpm) return
         val bpm = PlaybackMath.committedOriginalBpm(analysis.bpm)
         val current = playback.originalBpm
-        if (!force && abs(bpm - current) <= 0.05f) return
+        if (!force && abs(bpm - current) <= 0.005f) return
         val followMetronome = abs(_ui.value.metronomeBpm - current) < 0.51f
         playback.setOriginalBpm(bpm)
         if (followMetronome) playback.setMetronomeBpm(bpm)

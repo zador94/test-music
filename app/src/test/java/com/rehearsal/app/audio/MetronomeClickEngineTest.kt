@@ -110,6 +110,7 @@ class MetronomeClickEngineTest {
     fun chunkedMixStaysOnTheSameBeatGrid() {
         val engine = engine(enabled = true)
         engine.originalBpm = 90f
+        engine.setAnalysis(TrackAnalysis.grid(90f))
         val sampleRate = 44100
         val frames = sampleRate
         val chunkFrames = 512
@@ -147,6 +148,7 @@ class MetronomeClickEngineTest {
     fun analysisOffsetShiftsEqualGrid() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
+        engine.setAnalysis(TrackAnalysis.grid(120f, phaseSec = 0.23))
         engine.setGridOriginUs(230_000L)
         val sampleRate = 44100
         val frames = sampleRate * 2
@@ -183,14 +185,15 @@ class MetronomeClickEngineTest {
         val at250 = BeatClock.mediaUsToSample(250_000L, sampleRate).toInt()
         val atZero = 0
         assertTrue(
-            "click follows beats[] including 250ms",
-            peakInRange(shorts, at250, at250 + clickFrames) > 0.5,
+            "neighbor at 250ms is not a click",
+            peakInRange(shorts, at250, at250 + clickFrames) < 0.05,
         )
         assertTrue(
-            "click at first beat t=0",
+            "click on the even grid at t=0",
             peakInRange(shorts, atZero, atZero + clickFrames) > 0.5,
         )
-        assertEquals(5, engine.beatTimesUs.size)
+        assertEquals(0, engine.beatTimesUs.size)
+        assertEquals(BeatClock.intervalUs(120f), engine.clickIntervalUs())
     }
 
     @Test
@@ -217,7 +220,32 @@ class MetronomeClickEngineTest {
     }
 
     @Test
-    fun emptyBeatsFallsBackToEqualGrid() {
+    fun singleBeatStillPaintsClick() {
+        val engine = engine(enabled = true)
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = doubleArrayOf(0.5),
+                downbeatOffset = 0.0,
+                duration = 2.0,
+                periodSec = 0.5,
+                phaseSec = 0.0,
+                kickGridVersion = KickGrid.VERSION,
+            ),
+        )
+        assertEquals(0, engine.beatTimesUs.size)
+        val out = clickLayer(engine, silencePcm16(44100), 0L)
+        val shorts = out.duplicate().order(out.order()).asShortBuffer()
+        val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
+        val at500 = BeatClock.mediaUsToSample(500_000L, 44100).toInt()
+        assertTrue(
+            "one beat in beats[] must still click, peak=${peakInRange(shorts, at500, at500 + clickFrames)}",
+            peakInRange(shorts, at500, at500 + clickFrames) > 0.5,
+        )
+    }
+
+    @Test
+    fun emptyBeatsFallsBackToPeriodGrid() {
         val engine = engine(enabled = true)
         engine.originalBpm = 120f
         engine.setAnalysis(
@@ -236,7 +264,7 @@ class MetronomeClickEngineTest {
         val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
         val at500 = BeatClock.mediaUsToSample(500_000L, 44100).toInt()
         assertTrue(
-            "empty beats[] falls back to periodSec grid",
+            "empty beats[] must still click on periodSec, peak=${peakInRange(shorts, at500, at500 + clickFrames)}",
             peakInRange(shorts, at500, at500 + clickFrames) > 0.5,
         )
     }
@@ -308,6 +336,7 @@ class MetronomeClickEngineTest {
                 .build(),
         )
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         assertTrue("decoded sink input is PCM even if mime was AAC (0.3.8 silence)", engine.isPcm())
         val src = sinePcm16()
         val before = snapshot(src)
@@ -323,6 +352,7 @@ class MetronomeClickEngineTest {
         engine.configure(pcm16Format())
         engine.originalBpm = 120f
         engine.enabled = enabled
+        engine.setAnalysis(TrackAnalysis.grid(120f))
         return engine
     }
 

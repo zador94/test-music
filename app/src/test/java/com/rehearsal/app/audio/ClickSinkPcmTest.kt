@@ -85,6 +85,87 @@ class ClickSinkPcmTest {
     }
 
     @Test
+    fun stembeatAnalysisClicksIn1024ChunkSinkRemaining() {
+        val pcm = TempoDetectorTest.stereoClicks(bpm = 120.0, bars = 4, beatsPerBar = 4)
+        val analysis = TempoDetector.analyze(pcm)
+        assertTrue("Stembeat must write beats[], was ${analysis.beats.size}", analysis.beats.size >= 8)
+        val engine = engine()
+        engine.enabled = true
+        engine.originalBpm = analysis.bpm
+        engine.setAnalysis(analysis)
+        assertEquals(0, engine.beatTimesUs.size)
+        assertEquals(BeatClock.intervalUs(analysis.bpm), engine.clickIntervalUs())
+
+        val captured = ArrayList<ByteArray>()
+        val sink = MetronomeAudioSink(
+            capturingSink(captured, ArrayList()),
+            engine,
+            StemMixBank(),
+        )
+        sink.configure(pcm16(), 0, null)
+        val totalFrames = 44100 * 2
+        var offset = 0
+        while (offset < totalFrames) {
+            val n = minOf(CHUNK_FRAMES, totalFrames - offset)
+            val pts = BeatClock.sampleToMediaUs(offset.toLong(), 44100)
+            assertTrue(sink.handleBuffer(stemMixChunk(n), pts, 1))
+            offset += n
+        }
+        val played = concat(captured)
+        assertTrue(
+            "Stembeat beats[] must land in AudioTrack remaining(), peak=${peak(played)}",
+            peak(played) > 0.5,
+        )
+        val first = engine.gridOriginUs + engine.clickIntervalUs()
+        val at = BeatClock.mediaUsToSample(first, 44100).toInt()
+        val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
+        assertTrue(
+            "click at Stembeat beat ${first}us, peak=${peakInRange(played, at, at + clickFrames)}",
+            peakInRange(played, at, at + clickFrames) > 0.5,
+        )
+    }
+
+    @Test
+    fun singleBeatStillClicksInAudioSinkRemaining() {
+        val engine = engine()
+        engine.enabled = true
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = doubleArrayOf(0.5),
+                downbeatOffset = 0.0,
+                duration = 2.0,
+                periodSec = 0.5,
+                phaseSec = 0.0,
+                kickGridVersion = KickGrid.VERSION,
+            ),
+        )
+        assertEquals(0, engine.beatTimesUs.size)
+        val captured = ArrayList<ByteArray>()
+        val sink = MetronomeAudioSink(
+            capturingSink(captured, ArrayList()),
+            engine,
+            StemMixBank(),
+        )
+        sink.configure(pcm16(), 0, null)
+        val totalFrames = 44100
+        var offset = 0
+        while (offset < totalFrames) {
+            val n = minOf(CHUNK_FRAMES, totalFrames - offset)
+            val pts = BeatClock.sampleToMediaUs(offset.toLong(), 44100)
+            assertTrue(sink.handleBuffer(stemMixChunk(n), pts, 1))
+            offset += n
+        }
+        val played = concat(captured)
+        val at500 = BeatClock.mediaUsToSample(500_000L, 44100).toInt()
+        val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
+        assertTrue(
+            "mixInto must paint a lone beats[] mark in 23ms chunks, peak=${peakInRange(played, at500, at500 + clickFrames)}",
+            peakInRange(played, at500, at500 + clickFrames) > 0.5,
+        )
+    }
+
+    @Test
     fun farAwayPlausibleBeatsStillClickInAudioSinkRemaining() {
         val engine = engine()
         engine.enabled = true
@@ -98,9 +179,8 @@ class ClickSinkPcmTest {
                 phaseSec = 0.0,
             ),
         )
-        val times = engine.beatTimesUs
-        assertTrue(BeatClock.isPlausibleClickGrid(times, engine.clickIntervalUs()))
-        assertTrue(!BeatClock.hasBeatNear(times, 0L, 23_219L, engine.clickIntervalUs()))
+        assertEquals(0, engine.beatTimesUs.size)
+        assertEquals(BeatClock.intervalUs(120f), engine.clickIntervalUs())
 
         val captured = ArrayList<ByteArray>()
         val sink = MetronomeAudioSink(
@@ -113,7 +193,37 @@ class ClickSinkPcmTest {
         val pts = 0L
         assertTrue(sink.handleBuffer(source, pts, 1))
         assertTrue(
-            "beats hours away must not silence the metronome on the AudioTrack buffer",
+            "plausible beats[] in another timescale must fall back to the period grid, peak=${peak(concat(captured))}",
+            peak(concat(captured)) > 0.5,
+        )
+    }
+
+    @Test
+    fun liveBeatsDoNotInventRulerClickBetweenThem() {
+        val engine = engine()
+        engine.enabled = true
+        engine.setAnalysis(
+            TrackAnalysis(
+                bpm = 120f,
+                beats = doubleArrayOf(0.2, 0.7, 1.2),
+                downbeatOffset = 0.0,
+                duration = 8.0,
+                periodSec = 0.5,
+                phaseSec = 0.0,
+            ),
+        )
+        assertEquals(0, engine.beatTimesUs.size)
+
+        val captured = ArrayList<ByteArray>()
+        val sink = MetronomeAudioSink(
+            capturingSink(captured, ArrayList()),
+            engine,
+            StemMixBank(),
+        )
+        sink.configure(pcm16(), 0, null)
+        assertTrue(sink.handleBuffer(stemMixChunk(CHUNK_FRAMES), 0L, 1))
+        assertTrue(
+            "phase 0 draws the ruler at t=0 even if a neighbor beat is at 200ms, peak=${peak(concat(captured))}",
             peak(concat(captured)) > 0.5,
         )
     }

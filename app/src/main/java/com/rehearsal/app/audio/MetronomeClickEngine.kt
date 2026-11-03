@@ -13,8 +13,9 @@ import kotlin.math.tanh
 /**
  * Клик в том же PCM, что музыка: [mixInto] **после** WSOLA, в remaining()
  * того буфера, который [MetronomeAudioSink] отдаёт в DefaultAudioSink/AudioTrack.
- * Плеер читает `beats[]` в [setAnalysis] (секунды JSON → µs). Пустой / не-µs /
- * сетка мимо PTS стемов — решётка `periodSec`, как до 0.3.42. TIME_UNSET не t=0.
+ * Шаг — всегда `60 / originalBpm`, та же цифра, что в поле «Темп».
+ * Фаза — одна на весь трек (`phaseSec` + сдвиг телефона). `beats[]` не красим:
+ * соседний удар сдвигал сетку и она уезжала. TIME_UNSET не t=0.
  */
 class MetronomeClickEngine {
     @Volatile var enabled: Boolean = false
@@ -31,8 +32,8 @@ class MetronomeClickEngine {
     @Volatile var originalBpm: Float = DEFAULT_BPM
         set(value) {
             field = value
-            // periodSec уже задан — шаг клика не пересчитываем из BPM.
-            if (periodSec <= 1e-9) {
+            if (value > 0f) {
+                periodSec = 60.0 / value.toDouble()
                 lockedIntervalUs = BeatClock.intervalUs(value)
                 refreshGridOrigin()
             }
@@ -78,16 +79,12 @@ class MetronomeClickEngine {
 
     fun setAnalysis(analysis: TrackAnalysis?) {
         if (analysis == null) return
-        periodSec = if (analysis.hasClickPeriod()) analysis.periodSec else 0.0
-        lockedIntervalUs = if (periodSec > 1e-9) {
-            BeatClock.intervalFromPeriodSec(periodSec)
-        } else {
-            BeatClock.intervalUs(originalBpm)
-        }
         val phase = analysis.clickPhaseSec()
         kickPhaseUs = TempoMath.secondsToMediaUs(phase)
-        // Плеер читает analysis.json здесь: секунды → µs, не сырой beats[].
-        beatTimesUs = BeatClock.beatTimesUs(analysis.beats)
+        // Доли остаются в объекте для разбора, но клик их не читает.
+        beatTimesUs = LongArray(0)
+        periodSec = if (originalBpm > 0f) 60.0 / originalBpm.toDouble() else 0.0
+        lockedIntervalUs = BeatClock.intervalUs(originalBpm)
         refreshGridOrigin()
     }
 
@@ -99,7 +96,12 @@ class MetronomeClickEngine {
         refreshGridOrigin()
     }
 
-    fun clickIntervalUs(): Long = lockedIntervalUs.coerceAtLeast(1L)
+    fun clickIntervalUs(): Long {
+        // 30..240 BPM: от 2 с до 250 мс. Короче — клик забивает весь буфер, музыки не слышно.
+        val slowest = BeatClock.intervalUs(MIN_BPM)
+        val fastest = BeatClock.intervalUs(MAX_BPM)
+        return lockedIntervalUs.coerceIn(fastest, slowest)
+    }
 
     fun setGridOriginUs(originUs: Long) {
         gridOriginUs = originUs.coerceAtLeast(0L)
@@ -150,45 +152,23 @@ class MetronomeClickEngine {
         fromExclusiveUs: Long = Long.MIN_VALUE,
     ): Long {
         if (!enabled) return fromExclusiveUs
-        val bpm = originalBpm
-        if (bpm < MIN_BPM) return fromExclusiveUs
         val frames = outputFrames.coerceAtLeast(0)
         if (frames <= 0) return fromExclusiveUs
-        val speedSafe = speed.coerceIn(0.5f, 2f)
-        val inFrames = inputFrames.coerceAtLeast(1)
-        // TIME_UNSET / отрицательный PTS — не t=0: после seek это середина песни.
-        if (mediaStartUs == C.TIME_UNSET || mediaStartUs < 0L) return fromExclusiveUs
-        val startUs = mediaStartUs
-        val mediaDurationUs = BeatClock.sampleToMediaUs(inFrames.toLong(), sampleRate)
-            .coerceAtLeast(1L)
-        val endUs = startUs + mediaDurationUs
-        val clickMediaUs = (clickDurationUs() * speedSafe.toDouble()).toLong().coerceAtLeast(1L)
-        // Красим duplicate: play-cursor [position, limit] не двигаем.
-        // DefaultAudioSink / AudioTrack пишут только remaining().
         val origin = out.position()
         val limit = out.limit()
-        val view = out.duplicate().order(out.order())
-        val times = beatTimesUs
-        val interval = clickIntervalUs()
-        val searchStart = startUs - calibrationUs
-        val searchEnd = endUs - calibrationUs
-        // Секунды как µs / пустой beats[] / сетка не пересекает PTS стемов —
-        // firstOverlappingIndex мимо на каждом 23 мс chunk: снова решётка.
-        val useBeats = BeatClock.isPlausibleClickGrid(times, interval) &&
-            BeatClock.hasBeatNear(times, searchStart, searchEnd, interval)
-        val last = if (useBeats) {
-            paintBeatTimes(
-                view,
-                origin,
-                inFrames,
-                frames,
-                startUs,
-                endUs,
-                clickMediaUs,
-                times,
-                fromExclusiveUs,
-            )
-        } else {
+        return try {
+            val speedSafe = speed.coerceIn(0.5f, 2f)
+            val inFrames = inputFrames.coerceAtLeast(1)
+            // TIME_UNSET / отрицательный PTS — не t=0: после seek это середина песни.
+            if (mediaStartUs == C.TIME_UNSET || mediaStartUs < 0L) return fromExclusiveUs
+            val startUs = mediaStartUs
+            val mediaDurationUs = BeatClock.sampleToMediaUs(inFrames.toLong(), sampleRate)
+                .coerceAtLeast(1L)
+            val endUs = startUs + mediaDurationUs
+            val clickMediaUs = (clickDurationUs() * speedSafe.toDouble()).toLong().coerceAtLeast(1L)
+            // Красим duplicate: play-cursor [position, limit] не двигаем.
+            // DefaultAudioSink / AudioTrack пишут только remaining().
+            val view = out.duplicate().order(out.order())
             paintEqualGrid(
                 view,
                 origin,
@@ -197,48 +177,16 @@ class MetronomeClickEngine {
                 startUs,
                 endUs,
                 clickMediaUs,
-                interval,
+                clickIntervalUs(),
                 gridOriginUs,
                 fromExclusiveUs,
             )
+        } catch (_: Throwable) {
+            fromExclusiveUs
+        } finally {
+            out.position(origin)
+            out.limit(limit)
         }
-        out.position(origin)
-        out.limit(limit)
-        return last
-    }
-
-    private fun paintBeatTimes(
-        buffer: ByteBuffer,
-        origin: Int,
-        inFrames: Int,
-        outFrames: Int,
-        startUs: Long,
-        endUs: Long,
-        clickMediaUs: Long,
-        timesUs: LongArray,
-        fromExclusiveUs: Long,
-    ): Long {
-        val shift = calibrationUs
-        val searchStart = startUs - shift
-        if (BeatClock.firstOverlappingBeat(timesUs, searchStart, clickMediaUs) == Long.MAX_VALUE) {
-            return fromExclusiveUs
-        }
-        var i = BeatClock.firstOverlappingIndex(timesUs, searchStart, clickMediaUs)
-        var last = fromExclusiveUs
-        var guard = 0
-        while (i < timesUs.size && guard < MAX_BEATS_PER_BUFFER) {
-            val beatUs = timesUs[i] + shift
-            if (beatUs >= endUs) break
-            val startFrame = outputFrame(beatUs, startUs, inFrames, outFrames)
-            if (startFrame >= outFrames && beatUs > startUs) break
-            if (beatUs > fromExclusiveUs) {
-                paintClick(buffer, origin, inFrames, outFrames, startUs, beatUs)
-                last = maxOf(last, beatUs)
-            }
-            i++
-            guard++
-        }
-        return last
     }
 
     private fun paintEqualGrid(
@@ -352,7 +300,7 @@ class MetronomeClickEngine {
             if (sample in -1f..1f) return sample
             return tanh(sample.toDouble()).toFloat()
         }
-        private const val MAX_BEATS_PER_BUFFER = 10_000
+        private const val MAX_BEATS_PER_BUFFER = 32
 
         /**
          * Один короткий клик на каждую четверть. Без «раза» и без смены тембра.

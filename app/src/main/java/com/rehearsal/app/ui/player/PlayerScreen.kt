@@ -264,7 +264,7 @@ private fun OriginalBpmField(text: String, onChange: (String) -> Unit) {
                 },
             supportingText = {
                 Text(
-                    "30–240, можно десятые (104.6). Пишите число, применится по Done или когда уйдёте из строки. Пока набираете — плеер не трогаем.",
+                    "30–240, можно сотые (104.96). Пишите число, применится по Done или когда уйдёте из строки. Пока набираете — плеер не трогаем. Клик стучит ровно в это число.",
                     color = Daw.muted,
                 )
             },
@@ -322,7 +322,7 @@ private fun MetronomeBlock(
             )
         }
         Text(
-            "Желаемый BPM: ${PlaybackMath.displayedMetronomeBpm(ui.metronomeBpm)}",
+            "Желаемый BPM: ${PlaybackMath.formatOriginalBpm(ui.metronomeBpm)}",
             color = Daw.text,
         )
         val original = ui.originalBpm
@@ -341,8 +341,8 @@ private fun MetronomeBlock(
         Text(
             String.format(
                 Locale.US,
-                "Скорость = %d / %.1f = ×%.2f. Тон не меняется.",
-                PlaybackMath.displayedMetronomeBpm(ui.metronomeBpm),
+                "Скорость = %.2f / %.2f = ×%.2f. Тон не меняется.",
+                ui.metronomeBpm,
                 PlaybackMath.committedOriginalBpm(original),
                 ui.speed,
             ),

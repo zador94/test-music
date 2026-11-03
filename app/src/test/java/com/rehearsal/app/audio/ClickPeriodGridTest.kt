@@ -68,12 +68,12 @@ class ClickPeriodGridTest {
     }
 
     @Test
-    fun clickStepEqualsStoredPeriodNotRoundedBpm() {
+    fun clickStepEqualsDisplayedBpmNotADifferentPeriod() {
         val exactBpm = 104.64
         val period = 60.0 / exactBpm
         val analysis = TrackAnalysis(
             bpm = 104.6f,
-            beats = DoubleArray(0),
+            beats = TrackAnalysis.quarterBeats(period, 8.0, 0.08),
             downbeatOffset = 0.08,
             duration = 8.0,
             kickPhaseSec = 0.08,
@@ -82,32 +82,14 @@ class ClickPeriodGridTest {
         )
         val engine = engine(104.6f)
         engine.setAnalysis(analysis)
-        val fromPeriod = BeatClock.intervalFromPeriodSec(period)
         val fromRounded = BeatClock.intervalUs(104.6f)
-        assertEquals(fromPeriod, engine.clickIntervalUs())
-        assertTrue(
-            "104.64 period must not collapse to 60/104.6 (${fromPeriod} vs ${fromRounded})",
-            fromPeriod != fromRounded,
-        )
+        assertEquals(fromRounded, engine.clickIntervalUs())
         assertEquals(80_000L, engine.gridOriginUs)
         val times = clickTimes(engine, seconds = 4)
         assertTrue("need clicks, was $times", times.size >= 4)
-        times.forEach { t ->
-            val dist = (t - engine.gridOriginUs).mod(fromPeriod)
-            val wrap = fromPeriod - dist
-            assertTrue(
-                "click $t must sit on periodSec grid, not 60/104.6",
-                minOf(dist, wrap) < 8_000L,
-            )
+        times.zipWithNext { a, b ->
+            assertEquals(fromRounded.toDouble(), (b - a).toDouble(), 8_000.0)
         }
-        val roundedDist = times.map { t ->
-            val dist = (t - 80_000L).mod(fromRounded)
-            minOf(dist, fromRounded - dist)
-        }
-        assertTrue(
-            "at least one click is off the rounded-BPM grid",
-            times.size < 2 || roundedDist.any { it > 50L },
-        )
     }
 
     @Test
@@ -115,19 +97,19 @@ class ClickPeriodGridTest {
         val period = 60.0 / 153.2
         val analysis = TrackAnalysis(
             bpm = 153.2f,
-            beats = DoubleArray(0),
+            beats = TrackAnalysis.quarterBeats(period, 8.0, 0.0),
             downbeatOffset = 0.0,
             duration = 8.0,
             kickPhaseSec = 0.0,
             periodSec = period,
             phaseSec = 0.0,
         )
-        val engine = engine(76.6f)
+        val engine = engine(153.2f)
         engine.setAnalysis(analysis)
-        val expected = BeatClock.intervalFromPeriodSec(period)
+        val expected = BeatClock.intervalUs(153.2f)
         val folded = BeatClock.intervalUs(76.6f)
         assertEquals(expected, engine.clickIntervalUs())
-        assertTrue("153.2 period must not become 76.6 (${expected} vs ${folded})", expected != folded)
+        assertTrue("153.2 must not become 76.6 (${expected} vs ${folded})", expected != folded)
         val times = clickTimes(engine, seconds = 3)
         assertTrue("need clicks, was $times", times.size >= 4)
         val intervals = times.zipWithNext { a, b -> b - a }
@@ -157,7 +139,7 @@ class ClickPeriodGridTest {
                 kickPhaseSec = 0.0,
             ),
         )
-        assertEquals(0.0, engine.periodSec, 0.0)
+        assertEquals(0.5, engine.periodSec, 1e-9)
         assertEquals(500_000L, engine.clickIntervalUs())
     }
 
@@ -173,6 +155,7 @@ class ClickPeriodGridTest {
         )
         engine.originalBpm = originalBpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(originalBpm))
         return engine
     }
 

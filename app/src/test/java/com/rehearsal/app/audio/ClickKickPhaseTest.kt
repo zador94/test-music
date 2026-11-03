@@ -12,12 +12,11 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 
 /**
- * 0.3.42: клик из `beats[]`, не из одной `kickPhaseSec`.
- * Пустой `beats[]` — запасная решётка (см. ClickPeriodGridTest).
+ * Клик — ровная сетка от фазы и `60 / BPM`. Соседние метки `beats[]` его не двигают.
  */
 class ClickKickPhaseTest {
     @Test
-    fun clicksFollowBeatsNotSingleKickPhase() {
+    fun clicksFollowPhaseAndBpmNotNeighborBeats() {
         val bpm = 120
         val engine = engine(bpm.toFloat())
         engine.setAnalysis(
@@ -31,16 +30,17 @@ class ClickKickPhaseTest {
                 phaseSec = 0.08,
             ),
         )
-        assertEquals(5, engine.beatTimesUs.size)
+        assertEquals(0, engine.beatTimesUs.size)
+        assertEquals(BeatClock.intervalUs(120f), engine.clickIntervalUs())
         val times = clickMediaTimesUs(engine, 0L, seconds = 2)
-        assertTrue("need clicks, was $times", times.size >= 4)
-        val expected = longArrayOf(0L, 250_000L, 500_000L, 800_000L, 1_000_000L)
+        assertTrue("need clicks, was $times", times.size >= 3)
+        val expected = longArrayOf(80_000L, 580_000L, 1_080_000L, 1_580_000L)
         for (want in expected) {
-            assertTrue("click missing at beat $want, was $times", times.any { abs(it - want) < 8_000L })
+            assertTrue("click missing at $want, was $times", times.any { abs(it - want) < 8_000L })
         }
         assertTrue(
-            "must not sit on kickPhase 80ms when beats[] is present, was $times",
-            times.none { abs(it - 80_000L) < 8_000L },
+            "must not jump to the neighbor at 250ms, was $times",
+            times.none { abs(it - 250_000L) < 8_000L },
         )
     }
 
@@ -63,23 +63,17 @@ class ClickKickPhaseTest {
         val times = clickMediaTimesUs(engine, enableUs, seconds = 2)
         assertTrue("need clicks after enable, was $times", times.size >= 2)
         assertTrue(
-            "next stored beat after 1.2s is 1.5s, was $times",
-            times.any { abs(it - 1_500_000L) < 8_000L },
+            "next grid beat after 1.2s is 1.58s, was $times",
+            times.any { abs(it - 1_580_000L) < 8_000L },
         )
         assertFalse(
             "must not start a new grid at enable time 1.2s",
             times.any { abs(it - enableUs) < 8_000L },
         )
         assertTrue(
-            "must not paint kickPhase 80ms as if it were the grid",
-            times.none { abs(it - 80_000L) < 8_000L },
+            "must not jump onto the stored 1.5s mark, was $times",
+            times.none { abs(it - 1_500_000L) < 8_000L },
         )
-        val overlapping = BeatClock.firstOverlappingBeat(
-            engine.beatTimesUs,
-            enableUs,
-            engine.clickDurationUs(),
-        )
-        assertEquals(1_500_000L, overlapping)
     }
 
     @Test
@@ -108,6 +102,7 @@ class ClickKickPhaseTest {
         )
         engine.originalBpm = originalBpm
         engine.enabled = true
+        engine.setAnalysis(TrackAnalysis.grid(originalBpm))
         return engine
     }
 
