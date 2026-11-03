@@ -99,6 +99,57 @@ class HeardAttackPhaseTest {
         )
     }
 
+    @Test
+    fun quietTailPullsTheClickOffTheTip() {
+        val peak = 0.30
+        val body = peak + 0.170
+        val drums = KickGridTest.lowBandKicks(bpm = 105.0, phaseSec = body, bars = 16, beatsPerBar = 4)
+        val other = ringing(drums, atSec = peak, bpm = 105.0, beats = 16 * 4)
+        val grid = requireNotNull(
+            DrumPhase.phaseOnHeardAttack(
+                drumsLow = KickGrid.lowBandEnergy(drums, PulseTempo.HOP, KickGrid.LOWPASS_HZ),
+                heard = KickGrid.highpassEnergy(other, PulseTempo.HOP, KickGrid.LOWPASS_HZ),
+                sampleRate = drums.sampleRate,
+                hintBpm = 105.2f,
+            ),
+        )
+        val afterTip = wrapped(grid.phaseSec - peak, 60.0 / grid.bpm)
+        assertTrue(
+            "tail louder than a fifth still left the click early, after=${afterTip * 1000}ms",
+            afterTip > 0.014,
+        )
+        assertTrue(
+            "quiet tail pulled the click out of the attack, after=${afterTip * 1000}ms",
+            afterTip < 0.035,
+        )
+    }
+
+    private fun ringing(shape: StereoPcm, atSec: Double, bpm: Double, beats: Int): StereoPcm {
+        val sr = shape.sampleRate
+        val left = FloatArray(shape.samples)
+        val right = FloatArray(shape.samples)
+        val period = 60.0 / bpm
+        val tip = (0.004 * sr).toInt()
+        val mid = (0.020 * sr).toInt()
+        val quiet = (0.020 * sr).toInt()
+        for (n in 0 until beats) {
+            val at = ((atSec + n * period) * sr).toInt()
+            for (i in 0 until tip + mid + quiet) {
+                val idx = at + i
+                if (idx < 0 || idx >= left.size) continue
+                val env = when {
+                    i < tip -> 0.90
+                    i < tip + mid -> 0.40
+                    else -> 0.16
+                }
+                val s = (sin(2.0 * PI * 3500.0 * i / sr) * env).toFloat()
+                left[idx] = s
+                right[idx] = s
+            }
+        }
+        return StereoPcm(sr, left, right)
+    }
+
     private fun sustained(shape: StereoPcm, atSec: Double, holdSec: Double, bpm: Double, beats: Int): StereoPcm {
         val sr = shape.sampleRate
         val left = FloatArray(shape.samples)

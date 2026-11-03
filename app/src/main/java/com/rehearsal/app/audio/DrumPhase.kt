@@ -24,8 +24,15 @@ object DrumPhase {
     private const val BEATER_MIN_FRACTION = 0.45
     /** Пик атаки позже её фронта, но это всё ещё тот же удар, не соседний. */
     private const val ATTACK_PEAK_AFTER_RISE_SEC = 0.070
-    /** Спад после вершины. Центр этого куска — то, что слышно как удар. */
-    private const val ATTACK_BODY_SEC = 0.045
+    /**
+     * Спад после вершины. Половина вершины — всё ещё сам пик: у короткого
+     * щелчка энергия падает ниже 50% за один хоп, и центр остаётся на острие.
+     * Ухо слышит хвост, пока он громче примерно 15% вершины.
+     * На 20% короткий щелчок ещё рано: остаток хвоста тянет удар на ~5 мс.
+     * 60 мс — короче 16-й, так что соседний удар в окно не входит.
+     */
+    private const val ATTACK_BODY_SEC = 0.060
+    private const val ATTACK_BODY_FLOOR = 0.15f
     /** Позже hop STFT, не зашитые 200 мс. Верх — доля периода. */
     private const val DEMUCS_LAG_MIN_SEC = 0.060
     private const val DEMUCS_LAG_MAX_SEC = 0.45
@@ -186,7 +193,7 @@ object DrumPhase {
 
     /**
      * Самая ранняя устойчивая атака до тела ударных.
-     * Время — центр спада после вершины, не фронт и не сам пик:
+     * Время — центр хвоста после вершины, не фронт и не сам пик:
      * вершина слышна раньше удара.
      * Null — устойчивой атаки нет. Число в код не зашито.
      */
@@ -254,7 +261,7 @@ object DrumPhase {
     /** Центр тяжести атаки после пика: спад слышен позже самой вершины. */
     private fun attackCenterHop(heard: FloatArray, peak: Int, last: Int, hopSec: Double): Double {
         val cap = (peak + (ATTACK_BODY_SEC / hopSec).toInt().coerceAtLeast(1)).coerceAtMost(last)
-        val floor = heard[peak] * 0.50f
+        val floor = heard[peak] * ATTACK_BODY_FLOOR
         var weight = 0.0
         var moment = 0.0
         var k = peak
