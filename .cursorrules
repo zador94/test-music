@@ -1,0 +1,53 @@
+# Rehearsal — правила для агента
+
+Android-приложение «Репетиция»: трек с телефона один раз режется HT-Demucs на 4 стема, дальше играет под метроном. Speed = BPM метронома / BPM трека.
+
+## Стек
+
+Kotlin 2.0, JVM 17. Jetpack Compose (Material 3), Navigation, ViewModel.
+Media3 ExoPlayer 1.5 — только как транспорт уже сведённого PCM, не как декодер stem WAV.
+Room + KSP, WorkManager, Coroutines.
+ONNX Runtime, одна модель `htdemucs` (4 стема: drums, bass, other, vocals). Гитара в `other`.
+AGP 8.7, compileSdk/targetSdk 35, minSdk 26, applicationId `com.rehearsal.app`.
+Юнит-тесты: JUnit 4 на JVM. Устройство нужно только для звука, ExoPlayer и ONNX.
+
+Вне скоупа: YouTube, облако, iOS, аккорды, 6-stem, git-workflow, новые фреймворки.
+
+## Как править код
+
+Меняй только строки, которые решают задачу. Если изменились несколько строк — правь эти строки, не переписывай файл целиком и не переформатируй соседний код.
+
+Не добавляй «воду»: комментарии, которые пересказывают код; вводные абзацы; запасные абстракции; несвязанные рефакторинги; файлы, о которых не просили.
+
+Имена, пакеты и стиль — как в соседнем коде. Комментарий только там, где без него неочевидно инвариант (сетка клика, порядок выходов модели, фаза бочки).
+
+Логику метронома, BPM, микса и чанков Demucs покрывай тестом в `app/src/test`. Тест проверяет поведение, не факт существования файла. Compose, ExoPlayer и ONNX на JVM не гоняются: тестируй чистую математику и парсинг. После правок в `app/src/main` или `app/src/test`:
+
+```
+./gradlew --console=plain :app:assembleDebug :app:testDebugUnitTest
+```
+
+Без `clean`: Gradle пересобирает только изменившееся. `--console=plain` убирает прогресс-бары из лога; строки FAILED и падения тестов остаются. `--quiet` не использовать: он прячет и причину падения.
+
+Если сборка или тесты упали, анализируй только первые 30 строк ошибки, не читай весь лог целиком.
+
+Документация без кода приложения тесты не требует. Если тронут `app/src/main`, `assembleDebug` обязателен: юнит-тесты не ловят видимость, ресурсы и манифест.
+
+## Папки
+
+Корень — проект Android Studio (`settings.gradle.kts`). Пакет: `com.rehearsal.app`.
+
+```
+app/src/main/java/com/rehearsal/app/
+  audio/     WAV, PCM, HT-Demucs, сетка доли, клик метронома, сведение стемов
+  player/    скорость, WSOLA, микшер, политика и буферы воспроизведения
+  data/      Room (TrackEntity, DAO, Database), репозиторий, файлы трека, StemId
+  work/      WorkManager: скачивание модели и нарезка стемов
+  ui/        Compose: library, processing, player, theme; RehearsalRoot — навигация
+  MainActivity.kt, RehearsalApplication.kt
+app/src/main/res/          строки, тема, иконки
+app/src/test/java/.../     тесты рядом по тем же пакетам (audio, player, work)
+gradle/libs.versions.toml  версии зависимостей
+```
+
+На диске телефона: `files/tracks/<id>/original.*` и `stems/{vocals,drums,bass,other}.wav`. Модель: `files/models/htdemucs_fp16weights.onnx`.

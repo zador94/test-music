@@ -85,10 +85,10 @@ class ClickSinkPcmTest {
     }
 
     @Test
-    fun stembeatAnalysisClicksIn1024ChunkSinkRemaining() {
-        val pcm = TempoDetectorTest.stereoClicks(bpm = 120.0, bars = 4, beatsPerBar = 4)
-        val analysis = TempoDetector.analyze(pcm)
-        assertTrue("Stembeat must write beats[], was ${analysis.beats.size}", analysis.beats.size >= 8)
+    fun clickGridAnalysisClicksIn1024ChunkSinkRemaining() {
+        val silence = StereoPcm(44100, FloatArray(44100 * 4), FloatArray(44100 * 4))
+        val analysis = ClickGrid.fromPcm(silence)
+        assertTrue("ClickGrid must write an even ruler, was ${analysis.beats.size}", analysis.beats.size >= 8)
         val engine = engine()
         engine.enabled = true
         engine.originalBpm = analysis.bpm
@@ -113,14 +113,14 @@ class ClickSinkPcmTest {
         }
         val played = concat(captured)
         assertTrue(
-            "Stembeat beats[] must land in AudioTrack remaining(), peak=${peak(played)}",
+            "even grid must land in AudioTrack remaining(), peak=${peak(played)}",
             peak(played) > 0.5,
         )
         val first = engine.gridOriginUs + engine.clickIntervalUs()
         val at = BeatClock.mediaUsToSample(first, 44100).toInt()
         val clickFrames = (engine.clickDurationUs() * 44100 / 1_000_000L).toInt().coerceAtLeast(32)
         assertTrue(
-            "click at Stembeat beat ${first}us, peak=${peakInRange(played, at, at + clickFrames)}",
+            "click at ${first}us, peak=${peakInRange(played, at, at + clickFrames)}",
             peakInRange(played, at, at + clickFrames) > 0.5,
         )
     }
@@ -137,7 +137,7 @@ class ClickSinkPcmTest {
                 duration = 2.0,
                 periodSec = 0.5,
                 phaseSec = 0.0,
-                kickGridVersion = KickGrid.VERSION,
+                kickGridVersion = ClickGrid.VERSION,
             ),
         )
         assertEquals(0, engine.beatTimesUs.size)

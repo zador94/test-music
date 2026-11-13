@@ -29,8 +29,11 @@ class ClickGridLockTest {
                 phaseSec = 0.228,
             ),
         )
+        val exact = BeatClock.intervalFromPeriodSec(0.800117626775)
+        assertEquals(exact, engine.clickIntervalUs())
+        assertTrue(exact != BeatClock.intervalUs(75f))
         engine.originalBpm = 75f
-        assertEquals(BeatClock.intervalUs(75f), engine.clickIntervalUs())
+        assertEquals(exact, engine.clickIntervalUs())
         engine.originalBpm = 104.6f
         assertEquals(BeatClock.intervalUs(104.6f), engine.clickIntervalUs())
         assertEquals(TempoMath.secondsToMediaUs(0.228), engine.kickPhaseUs)

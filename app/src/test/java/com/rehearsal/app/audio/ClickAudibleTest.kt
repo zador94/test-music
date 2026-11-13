@@ -94,10 +94,7 @@ class ClickAudibleTest {
                 phaseSec = 0.0,
             ),
         )
-        // 0, 1, 2, 3 µs: firstOverlappingIndex at 1.2s finds nothing.
-        assertTrue(
-            !BeatClock.isPlausibleClickGrid(engine.beatTimesUs, engine.clickIntervalUs()),
-        )
+        assertEquals(0, engine.beatTimesUs.size)
         val out = sinkPcm(engine, silence(44100), 1_200_000L)
         assertTrue(
             "unusable seconds-as-µs beats[] must fall back to the period grid, peak=${peak(out)}",

@@ -13,7 +13,8 @@ import kotlin.math.tanh
 /**
  * Клик в том же PCM, что музыка: [mixInto] **после** WSOLA, в remaining()
  * того буфера, который [MetronomeAudioSink] отдаёт в DefaultAudioSink/AudioTrack.
- * Шаг — всегда `60 / originalBpm`, та же цифра, что в поле «Темп».
+ * Шаг — точный `periodSec` разбора, не `round(60_000_000 / originalBpm)`.
+ * Поле «Темп» переписывает шаг, только если цифра уже другая.
  * Фаза — одна на весь трек (`phaseSec` + сдвиг телефона). `beats[]` не красим:
  * соседний удар сдвигал сетку и она уезжала. TIME_UNSET не t=0.
  */
@@ -29,14 +30,20 @@ class MetronomeClickEngine {
     @Volatile var beatTimesUs: LongArray = LongArray(0)
         private set
     @Volatile private var lockedIntervalUs: Long = BeatClock.intervalUs(DEFAULT_BPM)
+    /** Период пришёл из разбора. Сотая в поле — округление того же шага, не новый. */
+    @Volatile private var gridPeriodLocked: Boolean = false
     @Volatile var originalBpm: Float = DEFAULT_BPM
         set(value) {
             field = value
-            if (value > 0f) {
-                periodSec = 60.0 / value.toDouble()
-                lockedIntervalUs = BeatClock.intervalUs(value)
+            if (value <= 0f) return
+            if (gridPeriodLocked && periodMatchesDisplayedBpm(periodSec, value)) {
                 refreshGridOrigin()
+                return
             }
+            gridPeriodLocked = false
+            periodSec = 60.0 / value.toDouble()
+            lockedIntervalUs = BeatClock.intervalUs(value)
+            refreshGridOrigin()
         }
     @Volatile var calibrationUs: Long = 0L
         set(value) {
@@ -83,17 +90,26 @@ class MetronomeClickEngine {
         kickPhaseUs = TempoMath.secondsToMediaUs(phase)
         // Доли остаются в объекте для разбора, но клик их не читает.
         beatTimesUs = LongArray(0)
-        periodSec = if (originalBpm > 0f) 60.0 / originalBpm.toDouble() else 0.0
-        lockedIntervalUs = BeatClock.intervalUs(originalBpm)
+        val period = analysis.clickPeriodSec()
+        periodSec = period
+        lockedIntervalUs = BeatClock.intervalFromPeriodSec(period)
+        gridPeriodLocked = analysis.hasClickPeriod()
         refreshGridOrigin()
     }
 
     fun clearGrid() {
+        gridPeriodLocked = false
         periodSec = 0.0
         kickPhaseUs = 0L
         beatTimesUs = LongArray(0)
         lockedIntervalUs = BeatClock.intervalUs(originalBpm)
         refreshGridOrigin()
+    }
+
+    /** Сотая BPM и период разбора — одна доля, если разошлись не больше чем на 0.015 BPM. */
+    private fun periodMatchesDisplayedBpm(period: Double, bpm: Float): Boolean {
+        if (!period.isFinite() || period <= 1e-9 || bpm <= 0f) return false
+        return abs(60.0 / period - bpm.toDouble()) <= 0.015
     }
 
     fun clickIntervalUs(): Long {

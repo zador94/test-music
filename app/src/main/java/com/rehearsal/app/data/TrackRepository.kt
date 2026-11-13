@@ -3,20 +3,10 @@ package com.rehearsal.app.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import com.rehearsal.app.audio.AudioBuffers
-import com.rehearsal.app.audio.DrumPhase
-import com.rehearsal.app.audio.KickGrid
-import com.rehearsal.app.audio.MappedWav
-import com.rehearsal.app.audio.PulseTempo
-import com.rehearsal.app.audio.StereoPcm
-import com.rehearsal.app.audio.TempoDetector
+import com.rehearsal.app.audio.ClickGrid
 import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.audio.WavReader
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.min
-import kotlin.math.sqrt
 import com.rehearsal.app.work.StemSplitWorker
 import java.io.File
 import java.util.UUID
@@ -46,9 +36,9 @@ class TrackRepository(
     suspend fun get(id: String): TrackEntity? = dao.getById(id)
 
     /**
-     * Сетка клика: Stembeat `beats[]` по миксу, потом DrumPhase.align.
-     * [force] — кнопка «Пересчитать». Само открытие песни файл заново не декодирует:
-     * клик уже стучит ровно по сохранённому темпу и одной фазе.
+     * Одна сетка: [ClickGrid] по drums.wav, без копии всей песни в RAM.
+     * Свежая версия при открытии списка не читает файл заново.
+     * [force] — кнопка «Пересчитать».
      */
     suspend fun refreshKickGrid(id: String, force: Boolean = false): TrackAnalysis? {
         val mutex = synchronized(kickGridLocks) { kickGridLocks.getOrPut(id) { Mutex() } }
@@ -56,165 +46,68 @@ class TrackRepository(
             withContext(Dispatchers.IO) {
                 val track = dao.getById(id) ?: return@withContext null
                 val existing = TrackAnalysis.fromFile(files.analysisJson(id))
-                if (!force && existing != null && !KickGrid.needsBeatTrack(existing)) {
-                    return@withContext existing
-                }
+                if (!force && ClickGrid.isCurrent(existing)) return@withContext existing
+                val drumsPath = track.drumsPath
+                val drumsFile = if (drumsPath.isNullOrBlank()) null else File(drumsPath)
+                if (drumsFile == null || !drumsFile.isFile) return@withContext existing
                 _kickGridBusy.update { it + id }
-                val mixWav = files.mixWorkWav(id)
                 try {
-                    var analyzed = existing
-                    val rerunTempo = force || KickGrid.needsBeatTrack(analyzed)
-                    val original = File(track.originalPath)
-                    var mixPcm: StereoPcm? = null
-                    if (rerunTempo) {
-                        if (!original.isFile) return@withContext existing
-                        AudioBuffers.decodeToWav44100(original, mixWav)
-                        mixPcm = WavReader.readStereo(mixWav)
-                        analyzed = TempoDetector.analyze(mixPcm)
+                    val mapped = WavReader.openMapped(drumsFile)
+                    try {
+                        val sr = mapped.info.sampleRate
+                        val duration = mapped.info.frameCount.toDouble() / sr.coerceAtLeast(1)
+                        val bands = ClickGrid.hopEnergies(mapped)
+                        val lead = externalEnergy(track.bassPath, track.otherPath, bands.low.size)
+                        val grid = ClickGrid.fromBands(
+                            bands.low,
+                            bands.mid,
+                            bands.high,
+                            sr,
+                            duration,
+                            hintBpm = existing?.bpm,
+                            lead = lead,
+                        )
+                        files.writeAnalysis(id, grid)
+                        dao.updateBpm(id, grid.bpm, System.currentTimeMillis())
+                        dao.getById(id)?.let { files.writeMeta(it) }
+                        grid
+                    } finally {
+                        mapped.close()
                     }
-                    val current = analyzed ?: return@withContext existing
-                    val drumsPath = track.drumsPath
-                    val drumsFile = if (drumsPath.isNullOrBlank()) null else File(drumsPath)
-                    val stamped = if (drumsFile != null && drumsFile.isFile) {
-                        if (mixPcm == null && original.isFile) {
-                            AudioBuffers.decodeToWav44100(original, mixWav)
-                            mixPcm = WavReader.readStereo(mixWav)
-                        }
-                        DrumPhase.align(current, WavReader.readStereo(drumsFile), mixPcm)
-                    } else {
-                        current
-                    }
-                    files.writeAnalysis(id, stamped)
-                    dao.updateBpm(id, stamped.bpm, System.currentTimeMillis())
-                    dao.getById(id)?.let { files.writeMeta(it) }
-                    stamped
                 } catch (_: Throwable) {
                     existing
                 } finally {
-                    mixWav.delete()
                     _kickGridBusy.update { it - id }
                 }
             }
         }
     }
 
-    /**
-     * Уточняет темп по уже готовому WAV ударных. Оригинал через MediaCodec не декодирует
-     * и музыку не глушит. Список песен это не вызывает — только открытый плеер.
-     */
-    suspend fun refinePulseTempo(id: String): TrackAnalysis? {
-        val mutex = synchronized(kickGridLocks) { kickGridLocks.getOrPut(id) { Mutex() } }
-        return mutex.withLock {
-            withContext(Dispatchers.IO) {
-                val track = dao.getById(id) ?: return@withContext null
-                val existing = TrackAnalysis.fromFile(files.analysisJson(id)) ?: return@withContext null
-                val drumsPath = track.drumsPath
-                val drumsFile = if (drumsPath.isNullOrBlank()) null else File(drumsPath)
-                if (drumsFile == null || !drumsFile.isFile) return@withContext existing
-                try {
-                    val drumsMapped = WavReader.openMapped(drumsFile)
-                    val others = openMapped(listOf(track.vocalsPath, track.bassPath, track.otherPath))
-                    try {
-                        val hop = PulseTempo.HOP
-                        val sr = drumsMapped.info.sampleRate
-                        val drumsLow = monoEnergy(listOf(drumsMapped), hop, StemBand.LOW)
-                        val heard = if (others.isEmpty()) {
-                            drumsLow
-                        } else {
-                            monoEnergy(others, hop, StemBand.HIGH)
-                        }
-                        val pulse = DrumPhase.phaseOnHeardAttack(drumsLow, heard, sr, existing.bpm)
-                            ?: return@withContext existing
-                        val bpm = pulse.bpm
-                        val period = 60.0 / bpm.toDouble().coerceAtLeast(1.0)
-                        val phase = pulse.phaseSec
-                        val oldPhase = existing.clickPhaseSec()
-                        var phaseDelta = (phase - oldPhase) % period
-                        if (phaseDelta > period / 2.0) phaseDelta -= period
-                        if (phaseDelta < -period / 2.0) phaseDelta += period
-                        if (abs(bpm - existing.bpm) < 0.005f && abs(phaseDelta) < 0.012) {
-                            return@withContext existing
-                        }
-                        val stamped = existing.copy(
-                            bpm = bpm,
-                            periodSec = period,
-                            phaseSec = phase,
-                            kickPhaseSec = phase,
-                            beats = TrackAnalysis.quarterBeats(period, existing.duration, phase),
-                            kickGridVersion = KickGrid.VERSION,
-                        )
-                        files.writeAnalysis(id, stamped)
-                        dao.updateBpm(id, stamped.bpm, System.currentTimeMillis())
-                        dao.getById(id)?.let { files.writeMeta(it) }
-                        stamped
-                    } finally {
-                        drumsMapped.close()
-                        others.forEach { it.close() }
-                    }
-                } catch (_: Throwable) {
-                    existing
-                }
+    /** Бас и «музыка»: атака, которой нет в теле ударных. */
+    private fun externalEnergy(bassPath: String?, otherPath: String?, hops: Int): FloatArray? {
+        if (hops <= 0) return null
+        var sum: FloatArray? = null
+        for (path in listOf(bassPath, otherPath)) {
+            val file = if (path.isNullOrBlank()) null else File(path)
+            if (file == null || !file.isFile) continue
+            val mapped = WavReader.openMapped(file)
+            try {
+                val energy = hopSum(ClickGrid.hopEnergies(mapped))
+                val n = min(hops, energy.size)
+                if (n <= 0) continue
+                if (sum == null) sum = FloatArray(hops)
+                val into = sum ?: continue
+                for (i in 0 until n) into[i] += energy[i]
+            } finally {
+                mapped.close()
             }
         }
+        return sum
     }
 
-    private enum class StemBand { LOW, HIGH }
-
-    /** Энергия по хопам, без копии всех стемов в RAM. HIGH — щелчок выше 150 Гц, без баса. */
-    private fun monoEnergy(wavs: List<MappedWav>, hop: Int, band: StemBand): FloatArray {
-        if (wavs.isEmpty()) return FloatArray(0)
-        val sr = wavs.first().info.sampleRate.coerceAtLeast(1)
-        val n = wavs.minOf { it.info.frameCount }
-        if (n <= 0 || hop <= 0) return FloatArray(0)
-        val frames = (n + hop - 1) / hop
-        val energy = FloatArray(frames)
-        val alpha = (1.0 - exp(-2.0 * PI * KickGrid.LOWPASS_HZ / sr)).toFloat()
-        var lp = 0f
-        val chunk = 4096
-        var pos = 0
-        var frame = 0
-        var acc = 0.0
-        var count = 0
-        while (pos < n && frame < frames) {
-            val take = min(chunk, n - pos)
-            val mono = FloatArray(take)
-            for (wav in wavs) {
-                val slice = wav.readRange(pos, take)
-                val m = min(take, slice.samples)
-                for (i in 0 until m) {
-                    mono[i] += 0.5f * (slice.left[i] + slice.right[i])
-                }
-            }
-            for (i in 0 until take) {
-                val x = mono[i]
-                lp += alpha * (x - lp)
-                val v = if (band == StemBand.LOW) lp else x - lp
-                acc += v * v
-                count++
-                if (count == hop) {
-                    energy[frame] = sqrt(acc / count).toFloat()
-                    frame++
-                    acc = 0.0
-                    count = 0
-                    if (frame >= frames) break
-                }
-            }
-            pos += take
-        }
-        if (count > 0 && frame < frames) {
-            energy[frame] = sqrt(acc / count).toFloat()
-        }
-        return energy
-    }
-
-    private fun openMapped(paths: List<String?>): List<MappedWav> {
-        val out = ArrayList<MappedWav>()
-        for (path in paths) {
-            if (path.isNullOrBlank()) continue
-            val file = File(path)
-            if (file.isFile) out.add(WavReader.openMapped(file))
-        }
-        return out
+    private fun hopSum(bands: ClickGrid.HopEnergies): FloatArray {
+        val n = minOf(bands.low.size, bands.mid.size, bands.high.size)
+        return FloatArray(n) { i -> bands.low[i] + bands.mid[i] + bands.high[i] }
     }
 
     suspend fun importFromUri(uri: Uri): String = withContext(Dispatchers.IO) {

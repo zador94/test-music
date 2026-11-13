@@ -7,23 +7,24 @@ import kotlin.math.roundToLong
 
 /**
  * Контракт веб-пайплайна: `tracks/{id}/analysis.json`.
- * `beats[]` — абсолютные секунды от t=0 декодированного 44.1 stereo PCM.
+ * `beats[]` — равные четверти `phase + n * period`, секунды от t=0.
+ * Клик их не читает: шаг — `periodSec`, фаза — `phaseSec`.
  */
 data class TrackAnalysis(
     val bpm: Float,
     val beats: DoubleArray,
-    /** Индекс доли 0..3, не секунды. */ 
+    /** Всегда 0: отдельного downbeat больше нет. */
     val downbeatOffset: Double,
     val timeSignature: IntArray = intArrayOf(4, 4),
     val duration: Double,
-    val sampleRate: Int = TempoDetector.SAMPLE_RATE,
+    val sampleRate: Int = ClickGrid.SAMPLE_RATE,
     val separator: String = SplitKind.HTDEMUCS_4STEM,
     val stems: List<String> = DEFAULT_STEMS,
     val kickPhaseSec: Double = 0.0,
     val kickGridVersion: Int = 0,
-    /** Точный период tempoOfTrack. Шаг клика, не `60 / bpm` после округления до 0.1. */
+    /** `60 / bpm` после округления до сотой. Шаг сохранённой линейки. */
     val periodSec: Double = 0.0,
-    /** Фаза бочки по drums в [periodSec] микса. Начало сетки клика. */
+    /** Одна фаза на весь трек. Начало сетки клика. */
     val phaseSec: Double = kickPhaseSec,
 ) {
     fun hasClickPeriod(): Boolean = periodSec.isFinite() && periodSec > 1e-9
@@ -98,7 +99,7 @@ data class TrackAnalysis(
             )
         }
 
-        /** Равные четверти только для тестов плеера. Плеер Stembeat так не рисует. */
+        /** Равные четверти `phase + n * period`. Так пишет [ClickGrid], так их хранит JSON. */
         fun quarterBeats(periodSec: Double, duration: Double, phaseSec: Double = 0.0): DoubleArray {
             if (periodSec <= 1e-9 || duration <= 0.0) return DoubleArray(0)
             val out = ArrayList<Double>((duration / periodSec).toInt() + 4)
@@ -116,7 +117,7 @@ data class TrackAnalysis(
             duration: Double = 16.0,
             phaseSec: Double = 0.0,
             periodSec: Double = 0.0,
-            sampleRate: Int = TempoDetector.SAMPLE_RATE,
+            sampleRate: Int = ClickGrid.SAMPLE_RATE,
         ): TrackAnalysis {
             val period = if (periodSec > 1e-9) periodSec else 60.0 / bpm.toDouble().coerceAtLeast(1.0)
             return TrackAnalysis(
@@ -145,7 +146,7 @@ data class TrackAnalysis(
                 val bpm = extractNumber(text, "bpm") ?: return null
                 val duration = extractNumber(text, "duration") ?: return null
                 val sampleRate = extractNumber(text, "sampleRate")?.roundToLong()?.toInt()
-                    ?: TempoDetector.SAMPLE_RATE
+                    ?: ClickGrid.SAMPLE_RATE
                 val downbeat = extractNumber(text, "downbeatOffset") ?: 0.0
                 val beats = extractNumberArray(text, "beats") ?: DoubleArray(0)
                 val signature = extractNumberArray(text, "timeSignature")

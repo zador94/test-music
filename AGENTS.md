@@ -6,8 +6,10 @@ When you change application code (Kotlin, player, metronome, stems, Room, ViewMo
 2. Run **both** of these and do not call the slice done if either fails:
 
 ```
-./gradlew clean :app:assembleDebug :app:testDebugUnitTest
+./gradlew --console=plain :app:assembleDebug :app:testDebugUnitTest
 ```
+
+Incremental: do not add `clean`. `--console=plain` keeps progress bars out of the log. Do not pass `--quiet`: it hides the failure reason. Test failures and `FAILED` lines must stay visible.
 
 `:app:testDebugUnitTest` compiles unit-test + main used by tests, but **does not** prove Android Studio / `assembleDebug` will compile. Visibility (`private var` vs `var` + `private set`), resources, manifest, Compose previews — ловит только полная сборка APK.
 

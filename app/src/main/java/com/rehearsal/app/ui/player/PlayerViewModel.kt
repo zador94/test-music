@@ -6,6 +6,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.rehearsal.app.RehearsalApplication
 import com.rehearsal.app.audio.ClickCalibration
+import com.rehearsal.app.audio.ClickGrid
 import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
@@ -38,6 +39,8 @@ data class PlayerUi(
     val metronomeOn: Boolean = false,
     val speed: Float = 1f,
     val clickShiftMs: Int = ClickCalibration.DEFAULT_MS,
+    val appVersion: String = "",
+    val clickGridVersion: Int = 0,
     val kickGridBusy: Boolean = false,
     val faders: Map<StemId, StemFader> = StemId.entries.associateWith { StemFader() },
 )
@@ -53,7 +56,18 @@ class PlayerViewModel(
     val track: StateFlow<TrackEntity?> = app.repository.observe(trackId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    private val _ui = MutableStateFlow(PlayerUi(clickShiftMs = playback.clickShiftMs))
+    private val appVersionName = try {
+        application.packageManager.getPackageInfo(application.packageName, 0).versionName.orEmpty()
+    } catch (_: Throwable) {
+        ""
+    }
+    private val _ui = MutableStateFlow(
+        PlayerUi(
+            clickShiftMs = playback.clickShiftMs,
+            appVersion = appVersionName,
+            clickGridVersion = ClickGrid.VERSION,
+        ),
+    )
     val ui: StateFlow<PlayerUi> = _ui.asStateFlow()
 
     private var loadKey: String? = null
@@ -242,12 +256,9 @@ class PlayerViewModel(
     }
 
     private suspend fun refreshKickGrid(force: Boolean) {
-        val analysis = if (force) {
-            app.repository.refreshKickGrid(trackId, true)
-        } else {
-            app.repository.refinePulseTempo(trackId)
-        } ?: return
+        val analysis = app.repository.refreshKickGrid(trackId, force) ?: return
         playback.applyKickGrid(analysis)
+        _ui.update { it.copy(clickGridVersion = analysis.kickGridVersion) }
         if (userOverrodeOriginalBpm) return
         val bpm = PlaybackMath.committedOriginalBpm(analysis.bpm)
         val current = playback.originalBpm

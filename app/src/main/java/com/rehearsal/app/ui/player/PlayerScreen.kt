@@ -366,6 +366,11 @@ private fun MetronomeBlock(
             color = Daw.muted,
             style = MaterialTheme.typography.bodySmall,
         )
+        Text(
+            "Сборка ${ui.appVersion}, сетка ${ui.clickGridVersion}",
+            color = Daw.muted,
+            style = MaterialTheme.typography.bodySmall,
+        )
         if (ui.kickGridBusy) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth(),

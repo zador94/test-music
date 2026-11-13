@@ -230,7 +230,7 @@ class MetronomeClickEngineTest {
                 duration = 2.0,
                 periodSec = 0.5,
                 phaseSec = 0.0,
-                kickGridVersion = KickGrid.VERSION,
+                kickGridVersion = ClickGrid.VERSION,
             ),
         )
         assertEquals(0, engine.beatTimesUs.size)

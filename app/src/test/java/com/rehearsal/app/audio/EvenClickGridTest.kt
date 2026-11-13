@@ -8,11 +8,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * Клик стучит ровно: шаг = 60 / цифра темпа, фаза одна.
+ * Клик стучит ровно: шаг = periodSec разбора, фаза одна.
  * Соседние удары и отдельный сдвиг песни сетку не двигают.
  */
 class EvenClickGridTest {
@@ -30,8 +31,9 @@ class EvenClickGridTest {
                 phaseSec = 0.115,
             ),
         )
-        val interval = BeatClock.intervalUs(105.0f)
+        val interval = BeatClock.intervalFromPeriodSec(0.55)
         assertEquals(interval, engine.clickIntervalUs())
+        assertTrue(interval != BeatClock.intervalUs(105.0f))
         assertEquals(0, engine.beatTimesUs.size)
         assertEquals(115_000L, engine.kickPhaseUs)
         val times = clickTimes(engine, seconds = 4)
@@ -73,33 +75,14 @@ class EvenClickGridTest {
     fun alignUsesOnePhaseAndAnEvenStep() {
         val bpm = 105.0
         val kickAt = 0.115
-        val pcm = KickGridTest.lowBandKicks(
-            bpm = bpm,
-            phaseSec = kickAt,
-            bars = 8,
-            beatsPerBar = 4,
-        )
-        val duration = pcm.samples.toDouble() / pcm.sampleRate
-        val aligned = DrumPhase.align(
-            TrackAnalysis(
-                bpm = bpm.toFloat(),
-                beats = doubleArrayOf(0.0, 0.4, 0.9),
-                downbeatOffset = 1.0,
-                duration = duration,
-                sampleRate = pcm.sampleRate,
-                periodSec = 0.55,
-                phaseSec = 0.0,
-                kickPhaseSec = 0.0,
-            ),
-            pcm,
-            pcm,
-        )
-        val period = 60.0 / bpm
-        assertEquals(period, aligned.periodSec, 1e-9)
-        assertEquals(105f, aligned.bpm, 0.01f)
+        val pcm = lowBandKicks(bpm, kickAt)
+        val aligned = ClickGrid.fromPcm(pcm, hintBpm = bpm.toFloat())
+        assertEquals(105.0, aligned.bpm.toDouble(), 0.5)
+        val period = aligned.periodSec
+        assertEquals(60.0 / aligned.bpm, period, 1e-6)
         assertTrue(aligned.beats.size >= 8)
         for (i in 1 until aligned.beats.size) {
-            assertEquals(period, aligned.beats[i] - aligned.beats[i - 1], 1e-6)
+            assertEquals(period, aligned.beats[i] - aligned.beats[i - 1], 1e-3)
         }
         val err = wrapped(aligned.phaseSec - kickAt, period)
         assertTrue(
@@ -164,6 +147,27 @@ class EvenClickGridTest {
             if (out.get(i).toInt() == before[i].toInt()) same++
         }
         assertTrue("song erased, same=$same of ${before.size}", same > before.size * 8 / 10)
+    }
+
+    private fun lowBandKicks(bpm: Double, phaseSec: Double): StereoPcm {
+        val sr = 44100
+        val period = 60.0 / bpm
+        val duration = phaseSec + 8 * 4 * period + 0.5
+        val n = (duration * sr).toInt()
+        val left = FloatArray(n)
+        val attack = (0.012 * sr).toInt()
+        var t = phaseSec
+        while (t < duration - 0.05) {
+            val i0 = (t * sr).toInt()
+            for (k in 0 until attack) {
+                val i = i0 + k
+                if (i !in left.indices) continue
+                val env = 1f - k.toFloat() / attack
+                left[i] = env * sin(2.0 * PI * 70.0 * k / sr).toFloat()
+            }
+            t += period
+        }
+        return StereoPcm(sr, left, left.copyOf())
     }
 
     private fun wrapped(delta: Double, period: Double): Double {

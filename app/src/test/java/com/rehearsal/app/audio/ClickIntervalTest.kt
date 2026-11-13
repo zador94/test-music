@@ -54,7 +54,7 @@ class ClickIntervalTest {
         val intInterval = BeatClock.intervalUs(105f)
         val beats = 40L
         val drift = abs(beats * trueInterval - beats * intInterval)
-        val hopUs = (TempoDetector.HOP * 1_000_000L) / 44100L
+        val hopUs = (512 * 1_000_000L) / 44100L
         assertTrue("105 integer grid drifts vs 104.6 after 40 beats, drift=$drift", drift > hopUs)
         val engine = engine(trueBpm)
         val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 10)
@@ -85,35 +85,6 @@ class ClickIntervalTest {
             headStuck = false,
         )
         assertInterval(displayed, intervals)
-    }
-
-    @Test
-    fun fonariBeatsOlsMustNotRushDisplayed102() {
-        val displayed = 102
-        val period = 60.0 / displayed
-        // Hop-512 snap like TempoDetector: intervals land on 50 or 51 hops (~101.3 / 103.3).
-        val hopSec = TempoDetector.HOP / 44100.0
-        val beats = DoubleArray(64) { i ->
-            val raw = i * period
-            val hops = kotlin.math.round(raw / hopSec)
-            hops * hopSec
-        }
-        val ols = TempoMath.bpmFromBeats(beats, hintBpm = 100.0)!!
-        val grid = PlaybackMath.committedOriginalBpm(ols.toFloat())
-        assertEquals(102.0, grid.toDouble(), 0.15)
-        val engine = engine(grid)
-        engine.setAnalysis(
-            TrackAnalysis(
-                bpm = grid,
-                beats = TrackAnalysis.quarterBeats(period, beats.last() + period, 0.0),
-                downbeatOffset = 0.0,
-                duration = beats.last() + period,
-                periodSec = period,
-                phaseSec = 0.0,
-            ),
-        )
-        val intervals = clickIntervalsUs(engine, 0L, speed = 1f, seconds = 6)
-        assertInterval(grid, intervals)
     }
 
     private fun assertInterval(displayedBpm: Int, intervalsUs: List<Long>) =

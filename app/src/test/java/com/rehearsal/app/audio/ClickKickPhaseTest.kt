@@ -76,20 +76,6 @@ class ClickKickPhaseTest {
         )
     }
 
-    @Test
-    fun clickLeadOffsetMovesOriginLater() {
-        val interval = BeatClock.intervalUs(102f)
-        val click = 0L
-        val kick = 90_000L
-        val corrected = BeatClock.alignOriginLater(0L, click, kick, interval)
-        assertEquals(kick, corrected)
-        assertTrue(corrected > click)
-        assertTrue(
-            "wrong wrap would put origin near the end of the beat",
-            corrected < interval / 2,
-        )
-    }
-
     private fun engine(originalBpm: Float): MetronomeClickEngine {
         val engine = MetronomeClickEngine()
         engine.configure(

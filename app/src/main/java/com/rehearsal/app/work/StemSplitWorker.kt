@@ -19,9 +19,8 @@ import com.rehearsal.app.audio.AudioBuffers
 import com.rehearsal.app.audio.DemucsChunkPlan
 import com.rehearsal.app.audio.HtDemucs
 import com.rehearsal.app.audio.HtdemucsModelStore
-import com.rehearsal.app.audio.DrumPhase
+import com.rehearsal.app.audio.ClickGrid
 import com.rehearsal.app.audio.MinChunkOomException
-import com.rehearsal.app.audio.TempoDetector
 import com.rehearsal.app.audio.TrackAnalysis
 import com.rehearsal.app.audio.WavReader
 import com.rehearsal.app.audio.WavWriter
@@ -106,7 +105,8 @@ class StemSplitWorker(
                 files,
                 trackId,
                 stemFiles.getValue(StemId.DRUMS),
-                mixWav,
+                stemFiles.getValue(StemId.BASS),
+                stemFiles.getValue(StemId.OTHER),
             )
 
             val note =
@@ -196,7 +196,7 @@ class StemSplitWorker(
         val frames = WavReader.frameCount(mixWav)
         val analysis = try {
             val mix = WavReader.readStereo(mixWav)
-            TempoDetector.analyze(mix)
+            ClickGrid.fromPcm(mix)
         } catch (_: OutOfMemoryError) {
             TrackAnalysis.fallbackGrid(frames, HtDemucs.SAMPLE_RATE)
         } catch (_: Throwable) {
@@ -212,28 +212,59 @@ class StemSplitWorker(
         files: TrackFileStore,
         trackId: String,
         drumsFile: File,
-        mixWav: File,
+        bassFile: File,
+        otherFile: File,
     ) {
-        val drums = try {
-            WavReader.readStereo(drumsFile)
-        } catch (_: OutOfMemoryError) {
-            return
-        } catch (_: Throwable) {
-            return
-        }
-        val mix = try {
-            if (mixWav.isFile) WavReader.readStereo(mixWav) else null
-        } catch (_: OutOfMemoryError) {
-            null
-        } catch (_: Throwable) {
-            null
-        }
         val file = files.analysisJson(trackId)
         val existing = TrackAnalysis.fromFile(file) ?: return
-        val aligned = DrumPhase.align(existing, drums, mix)
-        files.writeAnalysis(trackId, aligned)
-        dao.updateBpm(trackId, aligned.bpm, System.currentTimeMillis())
-        dao.getById(trackId)?.let { files.writeMeta(it) }
+        val drums = try {
+            WavReader.openMapped(drumsFile)
+        } catch (_: Throwable) {
+            return
+        }
+        try {
+            val sr = drums.info.sampleRate
+            val duration = drums.info.frameCount.toDouble() / sr.coerceAtLeast(1)
+            val bands = ClickGrid.hopEnergies(drums)
+            val lead = externalEnergy(bassFile, otherFile, bands.low.size)
+            val aligned = ClickGrid.fromBands(
+                bands.low,
+                bands.mid,
+                bands.high,
+                sr,
+                duration,
+                hintBpm = existing.bpm,
+                lead = lead,
+            )
+            files.writeAnalysis(trackId, aligned)
+            dao.updateBpm(trackId, aligned.bpm, System.currentTimeMillis())
+            dao.getById(trackId)?.let { files.writeMeta(it) }
+        } finally {
+            drums.close()
+        }
+    }
+
+    private fun externalEnergy(bassFile: File, otherFile: File, hops: Int): FloatArray? {
+        if (hops <= 0) return null
+        val sum = FloatArray(hops)
+        var any = false
+        for (file in listOf(bassFile, otherFile)) {
+            if (!file.isFile) continue
+            val mapped = try {
+                WavReader.openMapped(file)
+            } catch (_: Throwable) {
+                continue
+            }
+            try {
+                val bands = ClickGrid.hopEnergies(mapped)
+                val n = minOf(hops, bands.low.size, bands.mid.size, bands.high.size)
+                for (i in 0 until n) sum[i] += bands.low[i] + bands.mid[i] + bands.high[i]
+                if (n > 0) any = true
+            } finally {
+                mapped.close()
+            }
+        }
+        return if (any) sum else null
     }
 
     private suspend fun markProcessing(dao: TrackDao, files: TrackFileStore, trackId: String) {
