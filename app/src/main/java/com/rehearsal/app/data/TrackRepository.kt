@@ -57,7 +57,8 @@ class TrackRepository(
                         val sr = mapped.info.sampleRate
                         val duration = mapped.info.frameCount.toDouble() / sr.coerceAtLeast(1)
                         val bands = ClickGrid.hopEnergies(mapped)
-                        val lead = externalEnergy(track.bassPath, track.otherPath, bands.low.size)
+                        val bass = stemEnergy(track.bassPath, bands.low.size)
+                        val other = stemEnergy(track.otherPath, bands.low.size)
                         val grid = ClickGrid.fromBands(
                             bands.low,
                             bands.mid,
@@ -65,7 +66,8 @@ class TrackRepository(
                             sr,
                             duration,
                             hintBpm = existing?.bpm,
-                            lead = lead,
+                            bass = bass,
+                            other = other,
                         )
                         files.writeAnalysis(id, grid)
                         dao.updateBpm(id, grid.bpm, System.currentTimeMillis())
@@ -83,26 +85,23 @@ class TrackRepository(
         }
     }
 
-    /** Бас и «музыка»: атака, которой нет в теле ударных. */
-    private fun externalEnergy(bassPath: String?, otherPath: String?, hops: Int): FloatArray? {
-        if (hops <= 0) return null
-        var sum: FloatArray? = null
-        for (path in listOf(bassPath, otherPath)) {
-            val file = if (path.isNullOrBlank()) null else File(path)
-            if (file == null || !file.isFile) continue
-            val mapped = WavReader.openMapped(file)
-            try {
-                val energy = hopSum(ClickGrid.hopEnergies(mapped))
-                val n = min(hops, energy.size)
-                if (n <= 0) continue
-                if (sum == null) sum = FloatArray(hops)
-                val into = sum ?: continue
-                for (i in 0 until n) into[i] += energy[i]
-            } finally {
-                mapped.close()
-            }
+    /** Энергия одного стема по тем же хопам, что и ударные. */
+    private fun stemEnergy(path: String?, hops: Int): FloatArray? {
+        if (hops <= 0 || path.isNullOrBlank()) return null
+        val file = File(path)
+        if (!file.isFile) return null
+        val mapped = WavReader.openMapped(file)
+        try {
+            val energy = hopSum(ClickGrid.hopEnergies(mapped))
+            if (energy.isEmpty()) return null
+            if (energy.size == hops) return energy
+            val out = FloatArray(hops)
+            val n = min(hops, energy.size)
+            for (i in 0 until n) out[i] = energy[i]
+            return out
+        } finally {
+            mapped.close()
         }
-        return sum
     }
 
     private fun hopSum(bands: ClickGrid.HopEnergies): FloatArray {

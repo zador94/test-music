@@ -226,7 +226,8 @@ class StemSplitWorker(
             val sr = drums.info.sampleRate
             val duration = drums.info.frameCount.toDouble() / sr.coerceAtLeast(1)
             val bands = ClickGrid.hopEnergies(drums)
-            val lead = externalEnergy(bassFile, otherFile, bands.low.size)
+            val bass = stemEnergy(bassFile, bands.low.size)
+            val other = stemEnergy(otherFile, bands.low.size)
             val aligned = ClickGrid.fromBands(
                 bands.low,
                 bands.mid,
@@ -234,7 +235,8 @@ class StemSplitWorker(
                 sr,
                 duration,
                 hintBpm = existing.bpm,
-                lead = lead,
+                bass = bass,
+                other = other,
             )
             files.writeAnalysis(trackId, aligned)
             dao.updateBpm(trackId, aligned.bpm, System.currentTimeMillis())
@@ -244,27 +246,23 @@ class StemSplitWorker(
         }
     }
 
-    private fun externalEnergy(bassFile: File, otherFile: File, hops: Int): FloatArray? {
-        if (hops <= 0) return null
-        val sum = FloatArray(hops)
-        var any = false
-        for (file in listOf(bassFile, otherFile)) {
-            if (!file.isFile) continue
-            val mapped = try {
-                WavReader.openMapped(file)
-            } catch (_: Throwable) {
-                continue
-            }
-            try {
-                val bands = ClickGrid.hopEnergies(mapped)
-                val n = minOf(hops, bands.low.size, bands.mid.size, bands.high.size)
-                for (i in 0 until n) sum[i] += bands.low[i] + bands.mid[i] + bands.high[i]
-                if (n > 0) any = true
-            } finally {
-                mapped.close()
-            }
+    private fun stemEnergy(file: File, hops: Int): FloatArray? {
+        if (hops <= 0 || !file.isFile) return null
+        val mapped = try {
+            WavReader.openMapped(file)
+        } catch (_: Throwable) {
+            return null
         }
-        return if (any) sum else null
+        try {
+            val bands = ClickGrid.hopEnergies(mapped)
+            val n = minOf(hops, bands.low.size, bands.mid.size, bands.high.size)
+            if (n <= 0) return null
+            return FloatArray(hops) { i ->
+                if (i < n) bands.low[i] + bands.mid[i] + bands.high[i] else 0f
+            }
+        } finally {
+            mapped.close()
+        }
     }
 
     private suspend fun markProcessing(dao: TrackDao, files: TrackFileStore, trackId: String) {

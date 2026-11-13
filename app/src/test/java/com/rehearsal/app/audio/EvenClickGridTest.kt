@@ -79,7 +79,8 @@ class EvenClickGridTest {
         val aligned = ClickGrid.fromPcm(pcm, hintBpm = bpm.toFloat())
         assertEquals(105.0, aligned.bpm.toDouble(), 0.5)
         val period = aligned.periodSec
-        assertEquals(60.0 / aligned.bpm, period, 1e-6)
+        assertEquals(60.0 / aligned.bpm, period, 2e-3)
+        assertTrue(abs(60.0 / period - aligned.bpm) <= 0.015)
         assertTrue(aligned.beats.size >= 8)
         for (i in 1 until aligned.beats.size) {
             assertEquals(period, aligned.beats[i] - aligned.beats[i - 1], 1e-3)

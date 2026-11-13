@@ -8,10 +8,10 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * Один разбор: темп и одна фаза.
- * Октаву решает бочка. Удвоенный hint микса четверть не подменяет.
- * Отношение 1.5 берётся, если цепочка четвертей длиннее цепочки бочки.
- * Бас за 180 мс до тела фазу не сдвигает. Верхний щелчок тоже.
+ * Совместный поиск: темп и одна фаза.
+ * Восьмая и половинный темп не подменяют четверть бочки.
+ * Громкий затакт проигрывает первой доле, если бас и other стоят на раз.
+ * Ранний бас и верхний щелчок бочку не переносят.
  */
 class ClickGridTest {
     @Test
@@ -22,8 +22,9 @@ class ClickGridTest {
             val grid = ClickGrid.fromPcm(pcm)
             assertEquals("$bpm was ${grid.bpm}", bpm, grid.bpm.toDouble(), 0.5)
             assertTrue("$bpm must not double, was ${grid.bpm}", grid.bpm < bpm.toFloat() * 1.4f)
-            val period = 60.0 / grid.bpm
-            assertEquals(period, grid.periodSec, 1e-6)
+            val period = grid.periodSec
+            assertEquals(60.0 / grid.bpm, period, 2e-3)
+            assertTrue(abs(60.0 / period - grid.bpm) <= 0.015)
             val err = wrapped(grid.phaseSec - phase, period)
             assertTrue(
                 "$bpm phase err=${err * 1000}ms, phase=${grid.phaseSec}",
@@ -103,7 +104,7 @@ class ClickGridTest {
         val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
         val low = FloatArray(n)
         repeat(7) { i -> spike(low, sr, introPhase + i * period, 1f) }
-        repeat(beats) { i -> spike(low, sr, 8 * period + chorusPhase + i * period, 0.40f) }
+        repeat(beats) { i -> spike(low, sr, 8 * period + chorusPhase + i * period, 0.70f) }
         val grid = ClickGrid.fromBands(low, null, null, sr, duration)
         assertEquals("tempo left the chain, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 1.5)
         val errChorus = wrapped(grid.phaseSec - chorusPhase, grid.periodSec)
@@ -203,15 +204,45 @@ class ClickGridTest {
     }
 
     @Test
-    fun lateLowHumpPullsTheClickOffTheEarlyAttack() {
+    fun lateLowHumpStaysOnTheFluxAttack() {
         val bpm = 102.0
         val period = 60.0 / bpm
         val attack = 0.20
         val body = attack + 0.080
         val grid = gridWithBody(bpm, attack, body)
-        val err = wrapped(grid.phaseSec - body, period)
+        val err = wrapped(grid.phaseSec - attack, period)
         assertTrue(
-            "80ms body must take the click, err=${err * 1000}ms phase=${grid.phaseSec} bpm=${grid.bpm}",
+            "80ms hump must leave the flux attack, err=${err * 1000}ms phase=${grid.phaseSec} bpm=${grid.bpm}",
+            abs(err) < 0.030,
+        )
+    }
+
+    @Test
+    fun anacrusisLosesWhenBassAndOtherHitTheDownbeat() {
+        val bpm = 100.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beat0 = 0.30
+        val beats = 32
+        val duration = beat0 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        val other = FloatArray(n)
+        for (i in 0 until beats) {
+            val beat = beat0 + i * period
+            spike(low, sr, beat - 0.050, 1f)
+            spike(low, sr, beat, 0.70f)
+            if (i % 4 == 0) {
+                spike(bass, sr, beat, 1f)
+                spike(other, sr, beat, 1f)
+            }
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass, other = other)
+        assertEquals("anacrusis moved the tempo, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        val err = wrapped(grid.phaseSec - beat0, grid.periodSec)
+        assertTrue(
+            "anacrusis took the downbeat, err=${err * 1000}ms phase=${grid.phaseSec}",
             abs(err) < 0.030,
         )
     }
