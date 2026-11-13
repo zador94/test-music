@@ -9,7 +9,8 @@ import kotlin.math.sin
 
 /**
  * Один разбор: темп и одна фаза.
- * Октаву решает бочка. Отношение 1.5 и удвоенный hint микса четверть не подменяют.
+ * Октаву решает бочка. Удвоенный hint микса четверть не подменяет.
+ * Отношение 1.5 берётся, если цепочка четвертей длиннее цепочки бочки.
  * Бас за 180 мс до тела фазу не сдвигает. Верхний щелчок тоже.
  */
 class ClickGridTest {
@@ -63,6 +64,58 @@ class ClickGridTest {
         val grid = ClickGrid.fromPcm(backbeat(102.0))
         assertEquals("backbeat was ${grid.bpm}", 102.0, grid.bpm.toDouble(), 2.0)
         assertTrue("must not sit on 68, was ${grid.bpm}", abs(grid.bpm - 68f) > 8f)
+    }
+
+    @Test
+    fun dottedKickLosesWhenTheQuarterChainIsLonger() {
+        val bpm = 102.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beats = 36
+        val duration = 0.05 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        var kick = 0.05
+        while (kick < duration - 0.05) {
+            spike(low, sr, kick, 1f)
+            kick += period * 1.5
+        }
+        var snare = 0.05
+        repeat(beats) {
+            spike(mid, sr, snare, 1f)
+            snare += period
+        }
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration)
+        assertEquals("dotted kick stayed, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        assertTrue("must not sit on 68, was ${grid.bpm}", abs(grid.bpm - 68f) > 8f)
+    }
+
+    @Test
+    fun chainInterceptBeatsTheIntroAttack() {
+        val bpm = 100.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val introPhase = 0.052
+        val chorusPhase = 0.220
+        val beats = 16
+        val duration = 8 * period + chorusPhase + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        repeat(7) { i -> spike(low, sr, introPhase + i * period, 1f) }
+        repeat(beats) { i -> spike(low, sr, 8 * period + chorusPhase + i * period, 0.40f) }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration)
+        assertEquals("tempo left the chain, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 1.5)
+        val errChorus = wrapped(grid.phaseSec - chorusPhase, grid.periodSec)
+        val errIntro = wrapped(grid.phaseSec - introPhase, grid.periodSec)
+        assertTrue(
+            "phase must sit on the chorus chain, err=${errChorus * 1000}ms phase=${grid.phaseSec}",
+            abs(errChorus) < 0.040,
+        )
+        assertTrue(
+            "phase must leave the intro, err=${errIntro * 1000}ms phase=${grid.phaseSec}",
+            abs(errIntro) > 0.080,
+        )
     }
 
     @Test

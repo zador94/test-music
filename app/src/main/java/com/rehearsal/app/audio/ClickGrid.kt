@@ -1,6 +1,8 @@
 package com.rehearsal.app.audio
 
+import android.util.Log
 import com.rehearsal.app.player.PlaybackMath
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
@@ -10,16 +12,18 @@ import kotlin.math.sqrt
  * Единственный разбор доли.
  *
  * Темп бочки — автокорреляция низа в 55–180 BPM. Октаву решает бочка.
- * В 4/4 бочка и малый совпадают или относятся как 2, не как 1.5.
+ * В 4/4 бочка и малый совпадают или относятся как 2.
+ * Отношение 1.5 берётся, только если цепочка четвертей на both длиннее.
  * Самый короткий лаг не подменяет четверть восьмой.
  * Наклон цепочки может поправить цифру не больше чем на 1.5 BPM.
  *
- * Фаза — атака drumsPhase. Окно баса за 165–230 мс до тела выключено:
+ * Фаза — intercept цепочки, если fit его нашёл. Иначе атака drumsPhase.
+ * Окно баса за 165–230 мс до тела выключено:
  * оно сдвигало клик на −180 мс. Горб низа позже атаки — не дальше 80 мс.
  * Список долей — те же равные четверти. Клик их не читает.
  */
 object ClickGrid {
-    const val VERSION = 33
+    const val VERSION = 34
     const val SAMPLE_RATE = 44100
     const val HOP = 256
     const val LOWPASS_HZ = 150.0
@@ -31,6 +35,8 @@ object ClickGrid {
     private const val STRONG_PEAK_RATIO = 0.90f
     private const val CHAIN_WINDOW_BPM = 1.5
     private const val MIN_CHAIN = 8
+    private const val DIAG = "GRID_DIAG"
+    private var diagFitIntercept: Double? = null
 
     fun isCurrent(analysis: TrackAnalysis?): Boolean {
         if (analysis == null || analysis.kickGridVersion < VERSION) return false
@@ -102,6 +108,7 @@ object ClickGrid {
         hintBpm: Float? = null,
         lead: FloatArray? = null,
     ): TrackAnalysis {
+        diagFitIntercept = null
         val sr = sampleRate.coerceAtLeast(1)
         val duration = if (durationSec.isFinite() && durationSec > 0.0) {
             durationSec
@@ -110,17 +117,17 @@ object ClickGrid {
         }
         val hint = hintBpm?.takeIf { it.isFinite() && it > 0f }
         val lowFlux = fluxOf(low)
-        val kickTempo = estimateBpm(lowFlux, sr)
-        val snareTempo = if (mid != null && mid.size == low.size) {
-            val both = mixFlux(lowFlux, fluxOf(mid))
-            estimateBpm(both, sr)
+        val kickTempo = estimateBpm(lowFlux, sr, "kick")
+        val both = if (mid != null && mid.size == low.size) {
+            mixFlux(lowFlux, fluxOf(mid))
         } else {
             null
         }
-        val merged = mergeTempo(kickTempo, snareTempo)
+        val snareTempo = both?.let { estimateBpm(it, sr, "withSnare") }
+        val merged = mergeTempo(kickTempo, snareTempo, both, sr)
         val chosen = chooseTempo(merged, hint)
-        val refineFlux = if (snareTempo != null && merged != null && snareTempo == merged && mid != null) {
-            mixFlux(lowFlux, fluxOf(mid))
+        val refineFlux = if (snareTempo != null && merged != null && snareTempo == merged) {
+            both
         } else {
             lowFlux
         }
@@ -130,9 +137,22 @@ object ClickGrid {
         )
         val period = 60.0 / bpm.toDouble().coerceAtLeast(1.0)
         val drumsPhase = positiveMod(attackPhase(lowFlux, sr, bpm), period)
+        val fitPhase = diagFitIntercept?.let { intercept ->
+            ((intercept % period) + period) % period
+        }
         val phase = positiveMod(
-            refinePhase(low, drumsEnergy(low, mid, high), lead, sr, bpm, drumsPhase),
+            refinePhase(low, drumsEnergy(low, mid, high), lead, sr, bpm, fitPhase ?: drumsPhase),
             period,
+        )
+        Log.d(
+            DIAG,
+            "kickBpm=${diagNum(kickTempo)} withSnareBpm=${diagNum(snareTempo)} " +
+                "hintBpm=${diagNum(hint?.toDouble())} bpm=${diagNum(bpm.toDouble())}",
+        )
+        Log.d(
+            DIAG,
+            "drumsPhase=${diagNum(drumsPhase)} fitIntercept=${diagNum(diagFitIntercept)} " +
+                "fitPhase=${diagNum(fitPhase)} phase=${diagNum(phase)}",
         )
         return TrackAnalysis(
             bpm = bpm,
@@ -179,15 +199,22 @@ object ClickGrid {
     }
 
     /** Null — в сигнале нет ударов. */
-    private fun estimateBpm(flux: FloatArray, sampleRate: Int): Double? {
+    private fun estimateBpm(flux: FloatArray, sampleRate: Int, source: String = ""): Double? {
         var peak = 0f
         for (v in flux) if (v > peak) peak = v
-        if (peak < 1e-8f || flux.size < 32) return null
+        if (peak < 1e-8f || flux.size < 32) {
+            Log.d(DIAG, "autocorr source=$source top3=none")
+            return null
+        }
         val hopSec = HOP.toDouble() / sampleRate.coerceAtLeast(1)
         val minLag = lagFor(SEARCH_MAX_BPM, hopSec).coerceAtLeast(2)
         val maxLag = lagFor(SEARCH_MIN_BPM, hopSec).coerceAtMost(flux.size / 2)
-        if (maxLag <= minLag + 1) return null
+        if (maxLag <= minLag + 1) {
+            Log.d(DIAG, "autocorr source=$source top3=none")
+            return null
+        }
         val corr = autocorr(flux, minLag, maxLag)
+        logAutocorrTop(corr, minLag, maxLag, hopSec, source)
         var best = minLag
         for (lag in minLag..maxLag) {
             if (corr[lag] > corr[best]) best = lag
@@ -212,15 +239,35 @@ object ClickGrid {
     }
 
     /**
-     * Малый двигает темп только если он ровно вдвое чаще бочки:
-     * бочка на 1 и 3, малый на 2 и 4. Отношения 1.5 в 4/4 нет.
+     * Малый вдвое чаще бочки — четверть (бочка на 1 и 3, малый на 2 и 4).
+     * Отношение ровно 1.5: четверть withSnare, если на both её цепочка длиннее
+     * или у бочки непрерывной цепочки нет. Иначе остаётся бочка.
      * Громкое тело на каждой второй доле (77.5 поверх 155) четверть не замедляет.
      */
-    private fun mergeTempo(kick: Double?, withSnare: Double?): Double? {
+    private fun mergeTempo(
+        kick: Double?,
+        withSnare: Double?,
+        both: FloatArray?,
+        sampleRate: Int,
+    ): Double? {
         if (kick == null) return withSnare
         if (withSnare == null) return kick
         if (ratioClose(withSnare, kick * 2.0)) return withSnare
+        if (both != null && ratioClose(withSnare, kick * 1.5)) {
+            val kickChain = chainLength(both, sampleRate, kick)
+            val snareChain = chainLength(both, sampleRate, withSnare)
+            val pickSnare = snareChain > kickChain || kickChain < MIN_CHAIN
+            Log.d(DIAG, "dottedRatio kickChain=$kickChain snareChain=$snareChain pickSnare=$pickSnare")
+            if (pickSnare) return withSnare
+        }
         return kick
+    }
+
+    /** Длина longestChain на [flux]. Нет цепочки — 0, это меньше [MIN_CHAIN]. */
+    private fun chainLength(flux: FloatArray, sampleRate: Int, bpm: Double): Int {
+        val hopSec = HOP.toDouble() / sampleRate.coerceAtLeast(1)
+        val period = 60.0 / bpm.coerceAtLeast(1.0)
+        return longestChain(peakTimes(flux, period, hopSec), period)?.size ?: 0
     }
 
     /** Темп ударных уже есть — hint микса его не подменяет, в том числе удвоением. */
@@ -256,6 +303,7 @@ object ClickGrid {
         val period = 60.0 / bpm.coerceAtLeast(1.0)
         val chain = longestChain(peakTimes(flux, period, hopSec), period) ?: return bpm
         val line = fit(chain)
+        diagFitIntercept = line.intercept
         if (line.period <= 1e-6) return bpm
         val next = 60.0 / line.period
         if (!next.isFinite() || abs(next - bpm) > CHAIN_WINDOW_BPM) return bpm
@@ -445,6 +493,43 @@ object ClickGrid {
         val intercept = (sy - period * sx) / m
         return Line(period, intercept)
     }
+
+    private fun logAutocorrTop(
+        corr: FloatArray,
+        minLag: Int,
+        maxLag: Int,
+        hopSec: Double,
+        source: String,
+    ) {
+        val top = ArrayList<Int>()
+        for (lag in (minLag + 1) until maxLag) {
+            val c = corr[lag]
+            if (c <= 0f || c < corr[lag - 1] || c <= corr[lag + 1]) continue
+            top.add(lag)
+        }
+        top.sortByDescending { corr[it] }
+        val shown = top.take(3)
+        if (shown.isEmpty()) {
+            Log.d(DIAG, "autocorr source=$source top3=none")
+            return
+        }
+        val msg = buildString {
+            append("autocorr source=")
+            append(source)
+            append(" top3")
+            for (lag in shown) {
+                val bpm = 60.0 / (lag * hopSec)
+                append(" lag=")
+                append(lag)
+                append(" bpm=")
+                append(String.format(Locale.US, "%.2f", bpm))
+            }
+        }
+        Log.d(DIAG, msg)
+    }
+
+    private fun diagNum(value: Double?): String =
+        if (value == null || !value.isFinite()) "null" else String.format(Locale.US, "%.6f", value)
 
     private fun autocorr(x: FloatArray, minLag: Int, maxLag: Int): FloatArray {
         val n = x.size
