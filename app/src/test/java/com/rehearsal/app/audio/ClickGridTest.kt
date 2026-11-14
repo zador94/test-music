@@ -409,6 +409,36 @@ class ClickGridTest {
     }
 
     @Test
+    fun backbeatSnareMovesThePhaseOffTheSidechainBass() {
+        val bpm = 105.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val kickAt = 0.20
+        val beats = 32
+        val duration = kickAt + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        val high = FloatArray(n)
+        repeat(beats) { i ->
+            val t = kickAt + i * period
+            spike(low, sr, t, 0.6f)
+            spike(low, sr, t + period / 2.0, 1f)
+            if (i % 2 == 1) {
+                spike(mid, sr, t, 1f)
+                spike(high, sr, t, 1f)
+            }
+        }
+        val grid = ClickGrid.fromBands(low, mid, high, sr, duration)
+        assertEquals("bass moved the tempo, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        val err = wrapped(grid.phaseSec - kickAt, grid.periodSec)
+        assertTrue(
+            "off-beat bass kept the phase, err=${err * 1000}ms phase=${grid.phaseSec}",
+            abs(err) < 0.030,
+        )
+    }
+
+    @Test
     fun olderJsonIsNotCurrent() {
         val stale = TrackAnalysis.grid(120f).copy(kickGridVersion = ClickGrid.VERSION - 1)
         assertTrue(!ClickGrid.isCurrent(stale))

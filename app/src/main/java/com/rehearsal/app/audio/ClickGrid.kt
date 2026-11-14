@@ -24,9 +24,10 @@ import kotlin.math.sqrt
  * Фаза — сдвиг с шагом 2 мс, чья сетка собирает больше энергии в окне σ = 15 мс.
  * Октаву > 140 BPM не берём, если пик малого на 70–85 BPM сильнее быстрого.
  * Фаза уточняется параболой. periodSec — период этой сетки.
+ * Фаза сдвигается на полдоли, если там малый бьёт через удар (2 и 4), а не на каждой точке.
  */
 object ClickGrid {
-    const val VERSION = 37
+    const val VERSION = 38
     const val SAMPLE_RATE = 44100
     /** ~4.4 мс при 44.1 кГц: общий шаг функции атаки. */
     const val HOP = 192
@@ -52,6 +53,10 @@ object ClickGrid {
      * Быстрый кандидат > 140 BPM при более сильном пике малого на 70–85 BPM — тоже восьмая.
      */
     private const val OFFBEAT_IS_BEAT = 0.80
+    private const val MID_WINDOW_SEC = 0.015
+    private const val HALF_SHIFT_MID_RATIO = 1.25
+    /** Слабая половина точек / сильная. Ниже — бэкбит 2 и 4, выше — малый на каждой восьмой. */
+    private const val BACKBEAT_ALTERNATION = 0.50
     private const val DIAG = "GRID_DIAG"
 
     fun isCurrent(analysis: TrackAnalysis?): Boolean {
@@ -269,7 +274,53 @@ object ClickGrid {
             val score = gridScore(smooth, smoothBass, smoothOther, bassGate, otherGate, phase.phase, period, hopSec, duration)
             fits.add(Fit(period, phase.phase, score, kick))
         }
-        return choose(fits, kick)
+        val chosen = choose(fits, kick)
+        return chosen.copy(phaseSec = backbeatPhase(midFlux, chosen.phaseSec, chosen.periodSec, hopSec, duration))
+    }
+
+    /**
+     * Сайдчейн-бас ниже 150 Гц перебивает бочку и ставит φ на восьмую.
+     * Малый в 4/4 на 2 и 4: середина через точку сетки, сдвинутой на полдоли.
+     * Середина на каждой точке сдвинутой сетки — малый на офбите, φ остаётся.
+     */
+    private fun backbeatPhase(
+        midFlux: FloatArray?,
+        phase: Double,
+        period: Double,
+        hopSec: Double,
+        duration: Double,
+    ): Double {
+        if (midFlux == null || period <= 1e-6) return phase
+        val shifted = positiveMod(phase + period / 2.0, period)
+        val on = midByParity(midFlux, phase, period, hopSec, duration)
+        val off = midByParity(midFlux, shifted, period, hopSec, duration)
+        if (off[0] + off[1] <= (on[0] + on[1]) * HALF_SHIFT_MID_RATIO) return phase
+        val weak = minOf(off[0], off[1])
+        val strong = maxOf(off[0], off[1])
+        return if (weak < strong * BACKBEAT_ALTERNATION) shifted else phase
+    }
+
+    /** Сумма середины в ±[MID_WINDOW_SEC] вокруг чётных и нечётных точек сетки. */
+    private fun midByParity(
+        midFlux: FloatArray,
+        phase: Double,
+        period: Double,
+        hopSec: Double,
+        duration: Double,
+    ): DoubleArray {
+        val out = DoubleArray(2)
+        val radius = (MID_WINDOW_SEC / hopSec).roundToInt().coerceAtLeast(1)
+        var k = 0
+        var t = phase
+        while (t < duration - 1e-6) {
+            val center = floor(t / hopSec).toInt()
+            for (i in center - radius..center + radius) {
+                if (i in midFlux.indices) out[k % 2] += midFlux[i]
+            }
+            k++
+            t += period
+        }
+        return out
     }
 
     /**
