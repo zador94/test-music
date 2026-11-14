@@ -5,12 +5,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
  * Совместный поиск: темп и одна фаза.
  * Восьмая и половинный темп не подменяют четверть бочки.
- * Громкий затакт проигрывает первой доле, если бас и other стоят на раз.
+ * Бас и other не уводят фазу с более сильного удара бочки.
  * Ранний бас и верхний щелчок бочку не переносят.
  */
 class ClickGridTest {
@@ -120,10 +121,10 @@ class ClickGridTest {
     }
 
     @Test
-    fun halfTimeSnareDoesNotHalveTheKickTempo() {
+    fun eighthKicksDoNotDoubleWhenTheSnareHoldsTheSlowTempo() {
         val grid = ClickGrid.fromPcm(fastKicksWithHalfTimeBody(155.0))
-        assertEquals("half-time body halved the kick, was ${grid.bpm}", 155.0, grid.bpm.toDouble(), 3.0)
-        assertTrue("must stay on the fast octave, was ${grid.bpm}", grid.bpm > 120f)
+        assertEquals("eighth kicks doubled, was ${grid.bpm}", 77.5, grid.bpm.toDouble(), 3.0)
+        assertTrue("must stay under 120, was ${grid.bpm}", grid.bpm < 120f)
     }
 
     @Test
@@ -218,7 +219,7 @@ class ClickGridTest {
     }
 
     @Test
-    fun anacrusisLosesWhenBassAndOtherHitTheDownbeat() {
+    fun chordsOnTheDownbeatDoNotLeaveTheLouderKick() {
         val bpm = 100.0
         val period = 60.0 / bpm
         val sr = 44100
@@ -240,11 +241,115 @@ class ClickGridTest {
         }
         val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass, other = other)
         assertEquals("anacrusis moved the tempo, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
-        val err = wrapped(grid.phaseSec - beat0, grid.periodSec)
+        val err = wrapped(grid.phaseSec - (beat0 - 0.050), grid.periodSec)
         assertTrue(
-            "anacrusis took the downbeat, err=${err * 1000}ms phase=${grid.phaseSec}",
+            "chords left the louder kick, err=${err * 1000}ms phase=${grid.phaseSec}",
             abs(err) < 0.030,
         )
+    }
+
+    @Test
+    fun equalKicksPreferTheChordOnTheDownbeat() {
+        val bpm = 100.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beat0 = 0.30
+        val beats = 32
+        val duration = beat0 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        val other = FloatArray(n)
+        for (i in 0 until beats) {
+            val beat = beat0 + i * period
+            spike(low, sr, beat - 0.050, 1f)
+            spike(low, sr, beat, 1f)
+            if (i % 4 == 0) {
+                spike(bass, sr, beat, 1f)
+                spike(other, sr, beat, 1f)
+            }
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass, other = other)
+        val err = wrapped(grid.phaseSec - beat0, grid.periodSec)
+        assertTrue(
+            "equal kicks ignored the downbeat, err=${err * 1000}ms phase=${grid.phaseSec}",
+            abs(err) < 0.030,
+        )
+    }
+
+    @Test
+    fun syncopatedChordsDoNotPullTheKick() {
+        val bpm = 105.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val kickAt = 0.20
+        val shift = 0.140
+        val beats = 32
+        val duration = kickAt + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        val bass = FloatArray(n)
+        val other = FloatArray(n)
+        repeat(beats) { i ->
+            val t = kickAt + i * period
+            spike(low, sr, t, 1f)
+            spike(mid, sr, t + shift, 1f)
+            spike(bass, sr, t + shift, 1f)
+            spike(other, sr, t + shift, 1f)
+        }
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration, bass = bass, other = other)
+        assertEquals("syncopation moved the tempo, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        val err = wrapped(grid.phaseSec - kickAt, grid.periodSec)
+        assertTrue(
+            "syncopated chords pulled the kick, err=${err * 1000}ms phase=${grid.phaseSec}",
+            abs(err) < 0.030,
+        )
+    }
+
+    @Test
+    fun dottedKickAndSnareKeepTheQuarter() {
+        val bpm = 102.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beats = 36
+        val duration = 0.05 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        var kick = 0.05
+        while (kick < duration - 0.05) {
+            spike(low, sr, kick, 1f)
+            kick += period * 1.5
+        }
+        var snare = 0.05
+        repeat(beats) {
+            spike(mid, sr, snare, 1f)
+            snare += period
+        }
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration)
+        assertEquals("dotted kick hid the quarter, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        assertTrue("must not sit on 68, was ${grid.bpm}", abs(grid.bpm - 68f) > 8f)
+    }
+
+    @Test
+    fun snareOnEveryFastKickStaysFast() {
+        val bpm = 155.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beats = 32
+        val duration = 0.05 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        repeat(beats) { i ->
+            val t = 0.05 + i * period
+            spike(low, sr, t, 1f)
+            spike(mid, sr, t, 1f)
+        }
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration)
+        assertEquals("fast snare slowed the kick, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 3.0)
+        assertTrue("must stay on the fast octave, was ${grid.bpm}", grid.bpm > 120f)
     }
 
     @Test
@@ -256,6 +361,49 @@ class ClickGridTest {
         val err = wrapped(grid.phaseSec - attack, period)
         assertTrue(
             "20ms body must stay on the attack, err=${err * 1000}ms phase=${grid.phaseSec}",
+            abs(err) < 0.030,
+        )
+    }
+
+    @Test
+    fun nearIntegerTempoSnapsToTheWholeBpm() {
+        val grid = lowSpikes(105.0, 0.20, 64)
+        assertEquals(105f, grid.bpm, 0f)
+        assertEquals(60.0 / 105.0, grid.periodSec, 1e-9)
+    }
+
+    @Test
+    fun halfwayTempoIsNotSnapped() {
+        val grid = lowSpikes(105.5, 0.20, 64)
+        assertTrue("105.5 snapped, was ${grid.bpm}", abs(grid.bpm - 105.5f) < 0.3f)
+        assertTrue("105.5 snapped, was ${grid.bpm}", abs(grid.bpm - grid.bpm.roundToInt()) > 0.12f)
+    }
+
+    @Test
+    fun loudOffbeatSnareDoesNotPullThePhase() {
+        val bpm = 105.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val kickAt = 0.20
+        val snareLag = 0.285
+        val beats = 32
+        val duration = kickAt + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        val high = FloatArray(n)
+        repeat(beats) { i ->
+            val t = kickAt + i * period
+            spike(low, sr, t, 1f)
+            spike(low, sr, t + snareLag, 0.5f)
+            spike(mid, sr, t + snareLag, 1f)
+            spike(high, sr, t + snareLag, 1f)
+        }
+        val grid = ClickGrid.fromBands(low, mid, high, sr, duration)
+        assertEquals("snare moved the tempo, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        val err = wrapped(grid.phaseSec - kickAt, grid.periodSec)
+        assertTrue(
+            "snare at +285ms pulled the phase, err=${err * 1000}ms phase=${grid.phaseSec}",
             abs(err) < 0.030,
         )
     }
@@ -333,6 +481,16 @@ class ClickGridTest {
         return ClickGrid.fromBands(low, null, null, sr, duration, lead = lead)
     }
 
+    private fun lowSpikes(bpm: Double, phaseSec: Double, beats: Int): TrackAnalysis {
+        val sr = 44100
+        val period = 60.0 / bpm
+        val duration = phaseSec + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        repeat(beats) { i -> spike(low, sr, phaseSec + i * period, 1f) }
+        return ClickGrid.fromBands(low, null, null, sr, duration)
+    }
+
     private fun spike(energy: FloatArray, sampleRate: Int, timeSec: Double, amp: Float = 1f) {
         val i = (timeSec * sampleRate / ClickGrid.HOP).toInt()
         if (i in energy.indices) energy[i] = amp
@@ -406,7 +564,7 @@ class ClickGridTest {
         return StereoPcm(sr, left, left.copyOf())
     }
 
-    /** Ровная бочка на каждой четверти 155 и громкое тело на каждой второй. */
+    /** Бочка на каждой восьмой относительно 77.5 и малый только на четверти. */
     private fun fastKicksWithHalfTimeBody(bpm: Double): StereoPcm {
         val sr = 44100
         val period = 60.0 / bpm

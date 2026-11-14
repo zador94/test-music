@@ -8,6 +8,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.floor
+import kotlin.math.round
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -16,15 +17,16 @@ import kotlin.math.sqrt
  *
  * Атака — полуволновой поток по хопам [HOP] (~4 мс на 44.1 кГц).
  * Из потока вычитается локальная медиана: гул сайдчейна не держит пол.
- * Смесь: drums 0.6 (низ 0.55 / середина 0.30 / щелчок 0.15), bass 0.25, other 0.15.
+ * Ударные: низ 0.55 / середина 0.30 / щелчок 0.15 — по ним выбирается период. Фаза φ — только по бочке (низ).
+ * Bass и other в кривую не входят: каждый 4-й удар сетки на их совместной атаке получает +30%.
  * Темп — топ-3 периода автокорреляции в 65–165 BPM, кратности 0.5x / 1x / 2x.
+ * Кратность 1.5x добавляется в 90–145 BPM, если её подтверждает пик withSnare.
  * Фаза — сдвиг с шагом 2 мс, чья сетка собирает больше энергии в окне σ = 15 мс.
- * Каждый 4-й удар на совместной атаке bass и other получает +30%.
- * Октаву бочки восьмая и половинный темп не подменяют: это решает автокорреляция низа.
+ * Октаву > 140 BPM не берём, если пик малого на 70–85 BPM сильнее быстрого.
  * Фаза уточняется параболой. periodSec — период этой сетки.
  */
 object ClickGrid {
-    const val VERSION = 35
+    const val VERSION = 37
     const val SAMPLE_RATE = 44100
     /** ~4.4 мс при 44.1 кГц: общий шаг функции атаки. */
     const val HOP = 192
@@ -37,10 +39,9 @@ object ClickGrid {
     private const val PHASE_STEP_SEC = 0.002
     private const val SIGMA_SEC = 0.015
     private const val DOWNBEAT_BONUS = 1.30
+    /** Студийный трек на целом BPM: дробный хвост параболы к концу песни набегает в сдвиг. */
+    private const val INTEGER_BPM_SNAP = 0.12
     private const val STRONG_PEAK_RATIO = 0.90f
-    private const val DRUMS_W = 0.60
-    private const val BASS_W = 0.25
-    private const val OTHER_W = 0.15
     private const val LOW_W = 0.55
     private const val MID_W = 0.30
     private const val HIGH_W = 0.15
@@ -48,6 +49,7 @@ object ClickGrid {
      * Энергия посередине медленного периода / энергия на его ударах.
      * Ниже — восьмая (короче и слабее четверти). Выше — бочка на каждой четверти,
      * а медленный пик это половинный темп.
+     * Быстрый кандидат > 140 BPM при более сильном пике малого на 70–85 BPM — тоже восьмая.
      */
     private const val OFFBEAT_IS_BEAT = 0.80
     private const val DIAG = "GRID_DIAG"
@@ -133,11 +135,11 @@ object ClickGrid {
         val hopSec = HOP.toDouble() / sr
         val drums = drumsActivation(low, mid, high, hopSec)
         val kick = normalize(onsetFlux(low, hopSec))
+        val midFlux = onsetOf(mid, drums.size, hopSec)
         val bassOnset = onsetOf(bass ?: lead, drums.size, hopSec)
         val otherOnset = onsetOf(other, drums.size, hopSec)
-        val activation = mixActivation(drums, bassOnset, otherOnset)
-        val fit = searchGrid(activation, kick, bassOnset, otherOnset, hopSec, duration)
-        val period = fit?.periodSec ?: (60.0 / (hint?.toDouble() ?: MetronomeClickEngine.DEFAULT_BPM.toDouble()))
+        val fit = searchGrid(drums, kick, midFlux, bassOnset, otherOnset, hopSec, duration)
+        val period = fit?.periodSec?.let(::snapToIntegerBpm) ?: (60.0 / (hint?.toDouble() ?: MetronomeClickEngine.DEFAULT_BPM.toDouble()))
         val phase = positiveMod(fit?.phaseSec ?: 0.0, period)
         val bpm = PlaybackMath.committedOriginalBpm((60.0 / period).toFloat())
         Log.d(
@@ -241,6 +243,7 @@ object ClickGrid {
     private fun searchGrid(
         activation: FloatArray,
         kickOnset: FloatArray,
+        midFlux: FloatArray?,
         bass: FloatArray?,
         other: FloatArray?,
         hopSec: Double,
@@ -250,18 +253,21 @@ object ClickGrid {
         val wide = lagRange(hopSec, activation.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0)
         if (wide == null) return null
         val corr = autocorr(activation, wide.first, wide.second)
-        val kick = kickPeriod(kickOnset, hopSec)
-        val periods = withKick(topPeriods(corr, hopSec, wide.first, wide.second), kick)
+        val withSnare = autocorr(withSnareOnset(kickOnset, midFlux), wide.first, wide.second)
+        val kick = kickPeriod(kickOnset, midFlux, hopSec)
+        val periods = withKick(topPeriods(corr, withSnare, hopSec, wide.first, wide.second), kick)
         if (periods.isEmpty()) return null
         val smooth = gaussianSmooth(activation, hopSec, SIGMA_SEC)
+        val smoothKick = if (peakOf(kickOnset) >= 1e-6f) gaussianSmooth(kickOnset, hopSec, SIGMA_SEC) else smooth
         val smoothBass = bass?.let { gaussianSmooth(it, hopSec, SIGMA_SEC) }
         val smoothOther = other?.let { gaussianSmooth(it, hopSec, SIGMA_SEC) }
         val bassGate = (peakOf(smoothBass) * 0.40f)
         val otherGate = (peakOf(smoothOther) * 0.40f)
         val fits = ArrayList<Fit>(periods.size)
         for (period in periods) {
-            val phase = bestPhase(smooth, smoothBass, smoothOther, bassGate, otherGate, period, hopSec, duration)
-            fits.add(Fit(period, phase.phase, phase.score, kick))
+            val phase = bestPhase(smoothKick, smoothBass, smoothOther, bassGate, otherGate, period, hopSec, duration)
+            val score = gridScore(smooth, smoothBass, smoothOther, bassGate, otherGate, phase.phase, period, hopSec, duration)
+            fits.add(Fit(period, phase.phase, score, kick))
         }
         return choose(fits, kick)
     }
@@ -281,11 +287,11 @@ object ClickGrid {
         return if (octave) kickFit else best
     }
 
-    private fun kickPeriod(drums: FloatArray, hopSec: Double): Double? {
+    private fun kickPeriod(drums: FloatArray, midFlux: FloatArray?, hopSec: Double): Double? {
         if (peakOf(drums) < 1e-6f) return null
         val range = lagRange(hopSec, drums.size, SEARCH_MIN_BPM, SEARCH_MAX_BPM) ?: return null
         val corr = autocorr(drums, range.first, range.second)
-        val lag = octaveLag(corr, drums, hopSec, range.first, range.second)
+        val lag = octaveLag(corr, drums, midFlux, hopSec, range.first, range.second)
         if (lag < 0 || corr[lag] <= 0f) return null
         val refined = (lag + parabolic(corr, lag, range.first, range.second)) * hopSec
         val bpm = 60.0 / refined
@@ -304,7 +310,13 @@ object ClickGrid {
         return out
     }
 
-    private fun topPeriods(corr: FloatArray, hopSec: Double, minLag: Int, maxLag: Int): List<Double> {
+    private fun topPeriods(
+        corr: FloatArray,
+        withSnare: FloatArray,
+        hopSec: Double,
+        minLag: Int,
+        maxLag: Int,
+    ): List<Double> {
         val found = ArrayList<Pair<Double, Float>>()
         for (lag in (minLag + 1) until maxLag) {
             val c = corr[lag]
@@ -312,13 +324,17 @@ object ClickGrid {
             val period = (lag + parabolic(corr, lag, minLag, maxLag)) * hopSec
             if (period <= 1e-6) continue
             val bpm = 60.0 / period
-            for (factor in doubleArrayOf(0.5, 1.0, 2.0)) {
+            for (factor in doubleArrayOf(0.5, 1.0, 1.5, 2.0)) {
                 val folded = bpm * factor
                 if (folded < SEARCH_MIN_BPM || folded > SEARCH_MAX_BPM) continue
-                val foldedPeriod = refinePeriod(corr, 60.0 / folded, hopSec, minLag, maxLag)
+                val dotted = factor == 1.5
+                if (dotted && !withSnarePeak(withSnare, folded, hopSec, minLag, maxLag)) continue
+                val source = if (dotted) withSnare else corr
+                val foldedPeriod = refinePeriod(source, 60.0 / folded, hopSec, minLag, maxLag)
                 val foldedBpm = 60.0 / foldedPeriod
                 if (foldedBpm < SEARCH_MIN_BPM || foldedBpm > SEARCH_MAX_BPM) continue
-                found.add(foldedPeriod to tempoScore(corr, foldedBpm, hopSec, minLag, maxLag))
+                if (dotted && (foldedBpm < 90.0 || foldedBpm > 145.0)) continue
+                found.add(foldedPeriod to tempoScore(source, foldedBpm, hopSec, minLag, maxLag))
             }
         }
         found.sortByDescending { it.second }
@@ -448,20 +464,38 @@ object ClickGrid {
         return out
     }
 
-    private fun mixActivation(drums: FloatArray, bass: FloatArray?, other: FloatArray?): FloatArray {
-        val d = normalize(drums)
-        val b = bass?.takeIf { peakOf(it) >= 1e-6f }?.let { normalize(it) }
-        val o = other?.takeIf { peakOf(it) >= 1e-6f }?.let { normalize(it) }
-        var wd = DRUMS_W
-        var wb = if (b != null) BASS_W else 0.0
-        var wo = if (o != null) OTHER_W else 0.0
-        if (b == null && o == null) wd = 1.0
-        val weight = wd + wb + wo
-        return FloatArray(drums.size) { i ->
-            val bassV = b?.getOrElse(i) { 0f } ?: 0f
-            val otherV = o?.getOrElse(i) { 0f } ?: 0f
-            ((wd * d[i] + wb * bassV + wo * otherV) / weight).toFloat()
+    /** Бочка и малый поровну: пик четверти виден, даже если в смеси ударных его глушит бочка. */
+    private fun withSnareOnset(kick: FloatArray, midFlux: FloatArray?): FloatArray {
+        if (midFlux == null) return kick
+        val n = kick.size
+        val out = FloatArray(n)
+        for (i in 0 until n) {
+            val snare = if (i < midFlux.size) midFlux[i] else 0f
+            out[i] = kick[i] + snare
         }
+        return out
+    }
+
+    /** Кратность 1.5 только в 90..145 BPM и только на локальном пике withSnare. */
+    private fun withSnarePeak(
+        withSnare: FloatArray,
+        bpm: Double,
+        hopSec: Double,
+        minLag: Int,
+        maxLag: Int,
+    ): Boolean {
+        if (bpm < 90.0 || bpm > 145.0) return false
+        val lag = (60.0 / bpm / hopSec).roundToInt()
+        if (lag <= minLag || lag >= maxLag) return false
+        val window = (lag * 0.04).toInt().coerceAtLeast(2)
+        val from = (lag - window).coerceAtLeast(minLag + 1)
+        val to = (lag + window).coerceAtMost(maxLag - 1)
+        for (i in from..to) {
+            if (withSnare[i] > 0f && withSnare[i] >= withSnare[i - 1] && withSnare[i] >= withSnare[i + 1]) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun onsetOf(energy: FloatArray?, n: Int, hopSec: Double): FloatArray? {
@@ -571,6 +605,7 @@ object ClickGrid {
     private fun octaveLag(
         corr: FloatArray,
         onset: FloatArray,
+        midFlux: FloatArray?,
         hopSec: Double,
         minLag: Int,
         maxLag: Int,
@@ -593,7 +628,38 @@ object ClickGrid {
             return shortestStrongPeak(corr, best, minLag, maxLag)
         }
         val ratio = offbeatRatio(onset, slow * hopSec, hopSec)
-        return if (ratio >= OFFBEAT_IS_BEAT) fast else slow
+        if (ratio >= OFFBEAT_IS_BEAT && !midFluxHoldsSlow(midFlux, fast, slow, hopSec)) return fast
+        return slow
+    }
+
+    /**
+     * Восьмые бочки: быстрый кандидат > 140, а пик малого на медленном периоде 70..85
+     * сильнее пика на быстром. Удвоение тогда запрещено.
+     */
+    private fun midFluxHoldsSlow(
+        midFlux: FloatArray?,
+        fastLag: Int,
+        slowLag: Int,
+        hopSec: Double,
+    ): Boolean {
+        if (midFlux == null || hopSec <= 0.0 || fastLag <= 0 || slowLag <= 0) return false
+        val fastBpm = 60.0 / (fastLag * hopSec)
+        val slowBpm = 60.0 / (slowLag * hopSec)
+        if (fastBpm <= 140.0 || slowBpm < 70.0 || slowBpm > 85.0) return false
+        val range = lagRange(hopSec, midFlux.size, SEARCH_MIN_BPM, SEARCH_MAX_BPM) ?: return false
+        val corr = autocorr(midFlux, range.first, range.second)
+        return peakNear(corr, slowLag, range.first, range.second) >
+            peakNear(corr, fastLag, range.first, range.second)
+    }
+
+    private fun peakNear(corr: FloatArray, lag: Int, minLag: Int, maxLag: Int): Float {
+        if (lag !in corr.indices) return 0f
+        val window = (lag * 0.04).toInt().coerceAtLeast(1)
+        val from = (lag - window).coerceAtLeast(minLag).coerceAtLeast(0)
+        val to = (lag + window).coerceAtMost(maxLag).coerceAtMost(corr.lastIndex)
+        var best = 0f
+        for (i in from..to) if (corr[i] > best) best = corr[i]
+        return best
     }
 
     /**
@@ -677,6 +743,13 @@ object ClickGrid {
     private fun near(a: Double, b: Double, rel: Double): Boolean {
         val scale = maxOf(abs(a), abs(b), 1e-6)
         return abs(a - b) <= rel * scale
+    }
+
+    private fun snapToIntegerBpm(periodSec: Double): Double {
+        if (periodSec <= 1e-9) return periodSec
+        val bpm = 60.0 / periodSec
+        val whole = round(bpm)
+        return if (abs(bpm - whole) <= INTEGER_BPM_SNAP) 60.0 / whole else periodSec
     }
 
     private fun positiveMod(value: Double, period: Double): Double {
