@@ -246,6 +246,36 @@ class MetronomePcmPipeTest {
     }
 
     @Test
+    fun exoRendererOffsetPtsNormalizedForClickButPassedRawToSink() {
+        val offset = MetronomePcmPipe.EXO_RENDERER_OFFSET_MOD_US
+        val cases = longArrayOf(
+            offset,
+            2L * offset,
+            offset + 90_000_000L,
+        )
+        for (rawPts in cases) {
+            val songPts = rawPts % offset
+            val withOffset = runClickChunk(rawPts)
+            val withoutOffset = runClickChunk(songPts)
+            assertEquals(
+                "sink must keep raw ExoPlayer PTS=$rawPts",
+                rawPts,
+                withOffset.sinkPts,
+            )
+            assertEquals(
+                "normalized song PTS=$songPts must also pass through unchanged when already small",
+                songPts,
+                withoutOffset.sinkPts,
+            )
+            assertEquals(
+                "click PCM for raw=$rawPts must match songPts=$songPts",
+                withoutOffset.pcm.toList(),
+                withOffset.pcm.toList(),
+            )
+        }
+    }
+
+    @Test
     fun submittedBufferIsNeverTheDecoderBuffer() {
         val engine = engine(enabled = false)
         val pipe = MetronomePcmPipe(engine)
@@ -267,6 +297,27 @@ class MetronomePcmPipeTest {
             true
         }
         assertTrue("toggle must not start passing the decoder buffer", seen[1] !== decoder2)
+    }
+
+    private data class ClickChunk(val sinkPts: Long, val pcm: ByteArray)
+
+    private fun runClickChunk(pts: Long): ClickChunk {
+        val engine = engine(enabled = true)
+        val pipe = MetronomePcmPipe(engine)
+        pipe.configure(pcm16Format())
+        var sinkPts = C.TIME_UNSET
+        val submitted = ArrayList<Byte>()
+        val source = silence(1024)
+        val accepted = pipe.handleBuffer(source, pts, 1) { buffer, presentationTimeUs, _ ->
+            sinkPts = presentationTimeUs
+            val dup = buffer.asReadOnlyBuffer()
+            while (dup.hasRemaining()) submitted.add(dup.get())
+            buffer.position(buffer.limit())
+            true
+        }
+        assertTrue("chunk at pts=$pts must be accepted", accepted)
+        assertTrue("enabled click must paint into silence", submitted.any { it != 0.toByte() })
+        return ClickChunk(sinkPts, submitted.toByteArray())
     }
 
     private fun drain(

@@ -127,7 +127,7 @@ class MetronomePcmPipe(
             if (!haveSongPts) return null
             mediaCursorUs
         } else {
-            presentationTimeUs
+            songPtsFromRenderer(presentationTimeUs)
         }
         haveSongPts = true
         val frameSize = ClickMix.frameSizeBytes(clickEngine.encoding, clickEngine.channelCount)
@@ -135,6 +135,15 @@ class MetronomePcmPipe(
         val frames = remainingBytes / frameSize
         mediaCursorUs = pts + BeatClock.sampleToMediaUs(frames.toLong(), clickEngine.sampleRate)
         return pts
+    }
+
+    /** Media3 renderer offset → позиция от 0 начала трека. В sink уходит исходный PTS. */
+    private fun songPtsFromRenderer(presentationTimeUs: Long): Long {
+        return if (presentationTimeUs >= EXO_RENDERER_OFFSET_MOD_US) {
+            presentationTimeUs % EXO_RENDERER_OFFSET_MOD_US
+        } else {
+            presentationTimeUs
+        }
     }
 
     private fun logStart(ptsUs: Long, inFrames: Int, outFrames: Int) {
@@ -167,6 +176,8 @@ class MetronomePcmPipe(
 
     companion object {
         const val TAG = "ClickPipe"
+        /** Media3 DefaultRenderer base offset (DEFAULT_TIME_OFFSET_US); не кратен intervalUs. */
+        const val EXO_RENDERER_OFFSET_MOD_US = 1_000_000_000_000L
     }
 }
 

@@ -24,10 +24,13 @@ import kotlin.math.sqrt
  * Фаза — сдвиг с шагом 2 мс, чья сетка собирает больше энергии в окне σ = 15 мс.
  * Октаву > 140 BPM не берём, если пик малого на 70–85 BPM сильнее быстрого.
  * Фаза уточняется параболой. periodSec — период этой сетки.
+ * Период бочки перебивает родственного лучшего кандидата: октаву — если бочка сама бьёт на быстрой доле,
+ * 3:2 — если лучший сильнее меньше чем в 1.4 раза.
+ * Потом период ±0.5% и фаза уточняются по бочке на всём треке: одна сетка не уходит от долей к концу песни.
  * Фаза сдвигается на полдоли, если там малый бьёт через удар (2 и 4), а не на каждой точке.
  */
 object ClickGrid {
-    const val VERSION = 38
+    const val VERSION = 41
     const val SAMPLE_RATE = 44100
     /** ~4.4 мс при 44.1 кГц: общий шаг функции атаки. */
     const val HOP = 192
@@ -41,7 +44,7 @@ object ClickGrid {
     private const val SIGMA_SEC = 0.015
     private const val DOWNBEAT_BONUS = 1.30
     /** Студийный трек на целом BPM: дробный хвост параболы к концу песни набегает в сдвиг. */
-    private const val INTEGER_BPM_SNAP = 0.12
+    private const val INTEGER_BPM_SNAP = 0.03
     private const val STRONG_PEAK_RATIO = 0.90f
     private const val LOW_W = 0.55
     private const val MID_W = 0.30
@@ -53,10 +56,26 @@ object ClickGrid {
      * Быстрый кандидат > 140 BPM при более сильном пике малого на 70–85 BPM — тоже восьмая.
      */
     private const val OFFBEAT_IS_BEAT = 0.80
+    /**
+     * 3:2: период бочки перебивает лучшего кандидата, только если тот сильнее меньше чем в 1.4 раза.
+     * Замер: пунктир 1.05 (бочка права), «Фонари» 1.80 и 3+3+2 на 102 — 2.33 (лучший прав).
+     */
+    private const val OVERRIDE_SCORE_RATIO = 1.4
+    /**
+     * Октава: период бочки остаётся, если бочка сама бьёт и на быстрой доле (>= 0.7).
+     * Замер: восьмые бочки 0.98, восьмые-акценты 1.06 (бочка права), бэкбит 155 — 0.44 (лучший прав).
+     */
+    private const val FAST_PULSE_RATIO = 0.7
+    private const val REFINE_SPAN = 0.005
+    private const val REFINE_DRIFT_SEC = 0.002
+    private const val REFINE_MAX_STEPS = 600
+    private const val REFINE_START_SEC = 0.012
+    private const val REFINE_RIDGE_SEC = 0.004
+    private const val REFINE_ANCHOR_STEP_SEC = 0.001
     private const val MID_WINDOW_SEC = 0.015
-    private const val HALF_SHIFT_MID_RATIO = 1.25
+    private const val HALF_SHIFT_MID_RATIO = 1.05
     /** Слабая половина точек / сильная. Ниже — бэкбит 2 и 4, выше — малый на каждой восьмой. */
-    private const val BACKBEAT_ALTERNATION = 0.50
+    private const val BACKBEAT_ALTERNATION = 0.75
     private const val DIAG = "GRID_DIAG"
 
     fun isCurrent(analysis: TrackAnalysis?): Boolean {
@@ -274,8 +293,87 @@ object ClickGrid {
             val score = gridScore(smooth, smoothBass, smoothOther, bassGate, otherGate, phase.phase, period, hopSec, duration)
             fits.add(Fit(period, phase.phase, score, kick))
         }
-        val chosen = choose(fits, kick)
-        return chosen.copy(phaseSec = backbeatPhase(midFlux, chosen.phaseSec, chosen.periodSec, hopSec, duration))
+        Log.d(
+            DIAG,
+            "candidates kickBpm=${diagNum(kick)} " + fits.joinToString(" | ") {
+                "bpm=${diagNum(60.0 / it.periodSec)} period=${diagNum(it.periodSec)} " +
+                    "phase=${diagNum(it.phaseSec)} score=${diagNum(it.score)}"
+            },
+        )
+        val chosen = choose(fits, kick, kickOnset, hopSec)
+        val refined = refineGrid(smoothKick, chosen.periodSec, chosen.phaseSec, hopSec, duration)
+        return chosen.copy(
+            periodSec = refined.periodSec,
+            phaseSec = backbeatPhase(midFlux, refined.phaseSec, refined.periodSec, hopSec, duration),
+        )
+    }
+
+    private class Grid(val periodSec: Double, val phaseSec: Double)
+
+    private class AnchorFit(val anchorSec: Double, val score: Double)
+
+    /**
+     * Второй проход: период ±[REFINE_SPAN] мелким шагом вместе с фазой по средней энергии бочки на всём треке.
+     * Фаза держится на якоре в середине трека: сдвиг периода не уводит середину, а концы сдвигаются симметрично.
+     * Шаг периода такой, что концы трека сдвигаются не больше [REFINE_DRIFT_SEC] за шаг, поэтому
+     * якорь на соседнем периоде лежит рядом с якорем на предыдущем (хребет, окно [REFINE_RIDGE_SEC]).
+     * Целый BPM (см. [snapToIntegerBpm]) применяется здесь, чтобы фаза пересчиталась под уже округлённый период.
+     */
+    private fun refineGrid(
+        kick: FloatArray,
+        period: Double,
+        phase: Double,
+        hopSec: Double,
+        duration: Double,
+    ): Grid {
+        if (period <= 1e-6 || kick.isEmpty() || duration <= 0.0) return Grid(period, phase)
+        val beatsFromMid = (duration / (2.0 * period)).coerceAtLeast(1.0)
+        val span = REFINE_SPAN * period
+        val steps = Math.ceil(span * beatsFromMid / REFINE_DRIFT_SEC).toInt().coerceIn(1, REFINE_MAX_STEPS)
+        val dp = span / steps
+        val anchor0 = phase + round((duration / 2.0 - phase) / period) * period
+        val start = anchorFit(kick, period, anchor0, REFINE_START_SEC, hopSec)
+        var best = start
+        var bestPeriod = period
+        for (dir in intArrayOf(-1, 1)) {
+            var anchor = start.anchorSec
+            for (i in 1..steps) {
+                val p = period + dir * i * dp
+                val fit = anchorFit(kick, p, anchor, REFINE_RIDGE_SEC, hopSec)
+                anchor = fit.anchorSec
+                if (fit.score > best.score) {
+                    best = fit
+                    bestPeriod = p
+                }
+            }
+        }
+        val snapped = snapToIntegerBpm(bestPeriod)
+        if (snapped != bestPeriod) {
+            val radius = beatsFromMid * abs(snapped - bestPeriod) + REFINE_RIDGE_SEC
+            best = anchorFit(kick, snapped, best.anchorSec, radius, hopSec)
+            bestPeriod = snapped
+        }
+        Log.d(
+            DIAG,
+            "refine period=${diagNum(period)}->${diagNum(bestPeriod)} " +
+                "phase=${diagNum(positiveMod(phase, period))}->${diagNum(positiveMod(best.anchorSec, bestPeriod))} " +
+                "steps=$steps",
+        )
+        return Grid(bestPeriod, positiveMod(best.anchorSec, bestPeriod))
+    }
+
+    /** Лучший якорь в ±[radius] вокруг [center]: шаг 1 мс, потом парабола по трём соседним. */
+    private fun anchorFit(kick: FloatArray, period: Double, center: Double, radius: Double, hopSec: Double): AnchorFit {
+        val n = Math.ceil(radius / REFINE_ANCHOR_STEP_SEC).toInt().coerceAtLeast(1)
+        val scores = DoubleArray(2 * n + 1) { meanGrid(kick, center + (it - n) * REFINE_ANCHOR_STEP_SEC, period, hopSec) }
+        var bestI = 0
+        for (i in scores.indices) if (scores[i] > scores[bestI]) bestI = i
+        val delta = if (bestI in 1 until scores.lastIndex) {
+            parabolic3(scores[bestI - 1], scores[bestI], scores[bestI + 1])
+        } else {
+            0.0
+        }
+        return AnchorFit(center + (bestI - n + delta) * REFINE_ANCHOR_STEP_SEC, scores[bestI])
     }
 
     /**
@@ -294,9 +392,14 @@ object ClickGrid {
         val shifted = positiveMod(phase + period / 2.0, period)
         val on = midByParity(midFlux, phase, period, hopSec, duration)
         val off = midByParity(midFlux, shifted, period, hopSec, duration)
-        if (off[0] + off[1] <= (on[0] + on[1]) * HALF_SHIFT_MID_RATIO) return phase
         val weak = minOf(off[0], off[1])
         val strong = maxOf(off[0], off[1])
+        Log.d(
+            DIAG,
+            "on=${diagNum(on[0] + on[1])} off=${diagNum(off[0] + off[1])} " +
+                "weak=${diagNum(weak)} strong=${diagNum(strong)}",
+        )
+        if (off[0] + off[1] <= (on[0] + on[1]) * HALF_SHIFT_MID_RATIO) return phase
         return if (weak < strong * BACKBEAT_ALTERNATION) shifted else phase
     }
 
@@ -324,18 +427,48 @@ object ClickGrid {
     }
 
     /**
-     * Сумма попаданий выбирает период, кроме октавы бочки.
-     * Восьмая (период бочки / 2) и половинный темп (период × 2) остаются на периоде низа:
-     * сумма ударов взяла бы более частую сетку, а громкое тело на 1 и 3 — более редкую.
+     * Сумма попаданий выбирает период, кроме октавы и полиритма 3:2 бочки.
+     * Восьмая (период / 2), половинный темп (× 2), 2:3 и 3:2 могут остаться на периоде низа:
+     * сумма ударов взяла бы более частую сетку, а пунктир/синкопа — ложный 3:2.
+     * Октаву решает [fastPulseRatio]: отношение очков для неё не разделяет случаи (сетка вдвое чаще
+     * набирает почти вдвое больше). 3:2 решает отношение очков: пунктир слабее [OVERRIDE_SCORE_RATIO].
      */
-    private fun choose(fits: List<Fit>, kickBpm: Double?): Fit {
+    private fun choose(fits: List<Fit>, kickBpm: Double?, kickOnset: FloatArray, hopSec: Double): Fit {
         val best = fits.maxBy { it.score }
         if (kickBpm == null || kickBpm <= 0.0) return best
         val kickPeriod = 60.0 / kickBpm
         val kickFit = fits.minBy { abs(it.periodSec - kickPeriod) }
         if (!near(kickFit.periodSec, kickPeriod, 0.03)) return best
-        val octave = near(best.periodSec, kickPeriod / 2.0, 0.03) || near(best.periodSec, kickPeriod * 2.0, 0.03)
-        return if (octave) kickFit else best
+        val octave = near(best.periodSec, kickPeriod / 2.0, 0.03) ||
+            near(best.periodSec, kickPeriod * 2.0, 0.03)
+        val threeTwo = near(best.periodSec, kickPeriod * 2.0 / 3.0, 0.03) ||
+            near(best.periodSec, kickPeriod * 3.0 / 2.0, 0.03)
+        val pulse = if (octave) fastPulseRatio(kickOnset, best.periodSec, kickFit.periodSec, hopSec) else null
+        Log.d(
+            DIAG,
+            "choose best=${diagNum(60.0 / best.periodSec)} kickFit=${diagNum(60.0 / kickFit.periodSec)} " +
+                "related=${octave || threeTwo} ratio=${diagNum(best.score / kickFit.score)} " +
+                "fastPulse=${diagNum(pulse)}",
+        )
+        val keepKick = (pulse != null && pulse >= FAST_PULSE_RATIO) ||
+            (threeTwo && best.score < kickFit.score * OVERRIDE_SCORE_RATIO)
+        return if (keepKick) kickFit else best
+    }
+
+    /**
+     * Автокорреляция атак бочки на быстром лаге / на медленном. Близко к 1 — бочка бьёт и на быстрой доле,
+     * быстрая сетка тогда восьмые. Мало — на быстрых долях бьёт малый, быстрая сетка это четверть.
+     */
+    private fun fastPulseRatio(kickOnset: FloatArray, periodA: Double, periodB: Double, hopSec: Double): Double {
+        val fastLag = (minOf(periodA, periodB) / hopSec).roundToInt()
+        val slowLag = (maxOf(periodA, periodB) / hopSec).roundToInt()
+        val minLag = (fastLag * 0.9).toInt()
+        val maxLag = (slowLag * 1.1).toInt()
+        if (minLag < 1 || maxLag >= kickOnset.size / 2) return 0.0
+        val corr = autocorr(kickOnset, minLag, maxLag)
+        val slow = peakNear(corr, slowLag, minLag, maxLag)
+        if (slow <= 0f) return 0.0
+        return (peakNear(corr, fastLag, minLag, maxLag) / slow).toDouble()
     }
 
     private fun kickPeriod(drums: FloatArray, midFlux: FloatArray?, hopSec: Double): Double? {
