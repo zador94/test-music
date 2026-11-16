@@ -24,13 +24,13 @@ import kotlin.math.sqrt
  * Фаза — сдвиг с шагом 2 мс, чья сетка собирает больше энергии в окне σ = 15 мс.
  * Октаву > 140 BPM не берём, если пик малого на 70–85 BPM сильнее быстрого.
  * Фаза уточняется параболой. periodSec — период этой сетки.
- * Период бочки перебивает родственного лучшего кандидата: октаву — если бочка сама бьёт на быстрой доле,
- * 3:2 — если лучший сильнее меньше чем в 1.4 раза.
+ * Период бочки перебивает родственного лучшего кандидата: октаву — если бочка сама бьёт на быстрой доле
+ * и настоящий малый не бьёт на обеих половинах медленной сетки, 3:2 — если лучший сильнее меньше чем в 1.4 раза.
  * Потом период ±0.5% и фаза уточняются по бочке на всём треке: одна сетка не уходит от долей к концу песни.
  * Фаза сдвигается на полдоли, если там малый бьёт через удар (2 и 4), а не на каждой точке.
  */
 object ClickGrid {
-    const val VERSION = 41
+    const val VERSION = 44
     const val SAMPLE_RATE = 44100
     /** ~4.4 мс при 44.1 кГц: общий шаг функции атаки. */
     const val HOP = 192
@@ -66,6 +66,13 @@ object ClickGrid {
      * Замер: восьмые бочки 0.98, восьмые-акценты 1.06 (бочка права), бэкбит 155 — 0.44 (лучший прав).
      */
     private const val FAST_PULSE_RATIO = 0.7
+    /**
+     * Даже при бочке на быстрой доле быстрый темп верен, если настоящий малый бьёт на обеих половинах медленной сетки.
+     * Середина / низ >= 0.45: у восьмых-акцентов 0.38 (середина — только утечка бочки), у бэкбита 0.58, у восьмых бочки 0.79.
+     * Слабая / сильная половина >= 0.5: восьмые бочки 0.35 (малый только на чётных долях), 31-я весна 0.64, малый на каждой доле 0.64.
+     */
+    private const val MID_PRESENT_SHARE = 0.45
+    private const val MID_BOTH_HALVES = 0.5
     private const val REFINE_SPAN = 0.005
     private const val REFINE_DRIFT_SEC = 0.002
     private const val REFINE_MAX_STEPS = 600
@@ -76,7 +83,17 @@ object ClickGrid {
     private const val HALF_SHIFT_MID_RATIO = 1.05
     /** Слабая половина точек / сильная. Ниже — бэкбит 2 и 4, выше — малый на каждой восьмой. */
     private const val BACKBEAT_ALTERNATION = 0.75
+    /**
+     * Верх на сдвинутой половине сильнее, чем на текущей; щелчок (середина + верх) чередуется по долям
+     * ([BACKBEAT_ALTERNATION]: малый на каждой доле даёт ≈0.9, бэкбит 0.6); бочка не бьёт строго на текущей.
+     * Середина не годится для первого условия: она в 3-4 раза больше верха и у 31-й весны на обеих половинах равна.
+     * Верх сдвинутая / текущая: 31-я весна 1.54 (сдвиг), «Фонари» 0.63, «Титаник» 0.24.
+     * Бочка текущая / сдвинутая: 31-я весна 1.4, бас на восьмой и бэкбит 1.67 (сдвиг), малый на «и» над бочкой 2.0 (без сдвига).
+     */
+    private const val CRACK_SHIFT_RATIO = 1.15
+    private const val KICK_ON_BEAT_RATIO = 1.8
     private const val DIAG = "GRID_DIAG"
+    private const val PROFILE_BINS = 16
 
     fun isCurrent(analysis: TrackAnalysis?): Boolean {
         if (analysis == null || analysis.kickGridVersion < VERSION) return false
@@ -162,7 +179,9 @@ object ClickGrid {
         val midFlux = onsetOf(mid, drums.size, hopSec)
         val bassOnset = onsetOf(bass ?: lead, drums.size, hopSec)
         val otherOnset = onsetOf(other, drums.size, hopSec)
-        val fit = searchGrid(drums, kick, midFlux, bassOnset, otherOnset, hopSec, duration)
+        val midShare = if (mid == null) 0.0 else mid.sum().toDouble() / low.sum().toDouble().coerceAtLeast(1e-9)
+        val highFlux = onsetOf(high, drums.size, hopSec)
+        val fit = searchGrid(drums, kick, midFlux, highFlux, midShare, bassOnset, otherOnset, hopSec, duration)
         val period = fit?.periodSec?.let(::snapToIntegerBpm) ?: (60.0 / (hint?.toDouble() ?: MetronomeClickEngine.DEFAULT_BPM.toDouble()))
         val phase = positiveMod(fit?.phaseSec ?: 0.0, period)
         val bpm = PlaybackMath.committedOriginalBpm((60.0 / period).toFloat())
@@ -170,6 +189,13 @@ object ClickGrid {
             DIAG,
             "bpm=${diagNum(bpm.toDouble())} period=${diagNum(period)} phase=${diagNum(phase)} " +
                 "kickBpm=${diagNum(fit?.kickBpm)}",
+        )
+        Log.d(
+            DIAG,
+            "profile 16 bins per 2 beats, bin0 = grid point, bin8 = next beat, bin4 = eighth after bin0: " +
+                diagProfile("low", low, hopSec, period, phase) + " " +
+                diagProfile("mid", mid, hopSec, period, phase) + " " +
+                diagProfile("high", high, hopSec, period, phase),
         )
         return TrackAnalysis(
             bpm = bpm,
@@ -268,6 +294,8 @@ object ClickGrid {
         activation: FloatArray,
         kickOnset: FloatArray,
         midFlux: FloatArray?,
+        highFlux: FloatArray?,
+        midShare: Double,
         bass: FloatArray?,
         other: FloatArray?,
         hopSec: Double,
@@ -300,11 +328,11 @@ object ClickGrid {
                     "phase=${diagNum(it.phaseSec)} score=${diagNum(it.score)}"
             },
         )
-        val chosen = choose(fits, kick, kickOnset, hopSec)
+        val chosen = choose(fits, kick, kickOnset, midFlux, midShare, hopSec, duration)
         val refined = refineGrid(smoothKick, chosen.periodSec, chosen.phaseSec, hopSec, duration)
         return chosen.copy(
             periodSec = refined.periodSec,
-            phaseSec = backbeatPhase(midFlux, refined.phaseSec, refined.periodSec, hopSec, duration),
+            phaseSec = backbeatPhase(midFlux, highFlux, kickOnset, refined.phaseSec, refined.periodSec, hopSec, duration),
         )
     }
 
@@ -383,6 +411,8 @@ object ClickGrid {
      */
     private fun backbeatPhase(
         midFlux: FloatArray?,
+        highFlux: FloatArray?,
+        kickOnset: FloatArray,
         phase: Double,
         period: Double,
         hopSec: Double,
@@ -397,11 +427,35 @@ object ClickGrid {
         Log.d(
             DIAG,
             "on=${diagNum(on[0] + on[1])} off=${diagNum(off[0] + off[1])} " +
-                "weak=${diagNum(weak)} strong=${diagNum(strong)}",
+                "weak=${diagNum(weak)} strong=${diagNum(strong)} " +
+                "onParity=${diagNum(on[0])}/${diagNum(on[1])} offParity=${diagNum(off[0])}/${diagNum(off[1])}",
         )
-        if (off[0] + off[1] <= (on[0] + on[1]) * HALF_SHIFT_MID_RATIO) return phase
-        return if (weak < strong * BACKBEAT_ALTERNATION) shifted else phase
+        if (off[0] + off[1] > (on[0] + on[1]) * HALF_SHIFT_MID_RATIO && weak < strong * BACKBEAT_ALTERNATION) {
+            return shifted
+        }
+        val highOn = parity(highFlux, phase, period, hopSec, duration).sum()
+        val highOff = parity(highFlux, shifted, period, hopSec, duration)
+        val crackOff0 = off[0] + highOff[0]
+        val crackOff1 = off[1] + highOff[1]
+        val kickOn = parity(kickOnset, phase, period, hopSec, duration).sum()
+        val kickOff = parity(kickOnset, shifted, period, hopSec, duration).sum()
+        val crackAlternation = minOf(crackOff0, crackOff1) / maxOf(crackOff0, crackOff1).coerceAtLeast(1e-9)
+        Log.d(
+            DIAG,
+            "high on=${diagNum(highOn)} off=${diagNum(highOff.sum())} alternation=${diagNum(crackAlternation)} " +
+                "kick on=${diagNum(kickOn)} off=${diagNum(kickOff)}",
+        )
+        return if (highOff.sum() > highOn * CRACK_SHIFT_RATIO && crackAlternation < BACKBEAT_ALTERNATION &&
+            kickOn < kickOff * KICK_ON_BEAT_RATIO
+        ) {
+            shifted
+        } else {
+            phase
+        }
     }
+
+    private fun parity(flux: FloatArray?, phase: Double, period: Double, hopSec: Double, duration: Double): DoubleArray =
+        if (flux == null) DoubleArray(2) else midByParity(flux, phase, period, hopSec, duration)
 
     /** Сумма середины в ±[MID_WINDOW_SEC] вокруг чётных и нечётных точек сетки. */
     private fun midByParity(
@@ -430,10 +484,20 @@ object ClickGrid {
      * Сумма попаданий выбирает период, кроме октавы и полиритма 3:2 бочки.
      * Восьмая (период / 2), половинный темп (× 2), 2:3 и 3:2 могут остаться на периоде низа:
      * сумма ударов взяла бы более частую сетку, а пунктир/синкопа — ложный 3:2.
-     * Октаву решает [fastPulseRatio]: отношение очков для неё не разделяет случаи (сетка вдвое чаще
-     * набирает почти вдвое больше). 3:2 решает отношение очков: пунктир слабее [OVERRIDE_SCORE_RATIO].
+     * Октаву решает [fastPulseRatio] и середина: отношение очков для неё не разделяет случаи (сетка вдвое чаще
+     * набирает почти вдвое больше). Бочка на быстрой доле остаётся на медленном темпе, если только
+     * настоящий малый не бьёт на обеих половинах медленной сетки ([midHalvesRatio]).
+     * 3:2 решает отношение очков: пунктир слабее [OVERRIDE_SCORE_RATIO].
      */
-    private fun choose(fits: List<Fit>, kickBpm: Double?, kickOnset: FloatArray, hopSec: Double): Fit {
+    private fun choose(
+        fits: List<Fit>,
+        kickBpm: Double?,
+        kickOnset: FloatArray,
+        midFlux: FloatArray?,
+        midShare: Double,
+        hopSec: Double,
+        duration: Double,
+    ): Fit {
         val best = fits.maxBy { it.score }
         if (kickBpm == null || kickBpm <= 0.0) return best
         val kickPeriod = 60.0 / kickBpm
@@ -444,15 +508,36 @@ object ClickGrid {
         val threeTwo = near(best.periodSec, kickPeriod * 2.0 / 3.0, 0.03) ||
             near(best.periodSec, kickPeriod * 3.0 / 2.0, 0.03)
         val pulse = if (octave) fastPulseRatio(kickOnset, best.periodSec, kickFit.periodSec, hopSec) else null
+        val halves = if (pulse != null && pulse >= FAST_PULSE_RATIO) {
+            midHalvesRatio(midFlux, if (best.periodSec > kickFit.periodSec) best else kickFit, hopSec, duration)
+        } else {
+            null
+        }
         Log.d(
             DIAG,
             "choose best=${diagNum(60.0 / best.periodSec)} kickFit=${diagNum(60.0 / kickFit.periodSec)} " +
                 "related=${octave || threeTwo} ratio=${diagNum(best.score / kickFit.score)} " +
-                "fastPulse=${diagNum(pulse)}",
+                "fastPulse=${diagNum(pulse)} midShare=${diagNum(midShare)} midHalves=${diagNum(halves)}",
         )
-        val keepKick = (pulse != null && pulse >= FAST_PULSE_RATIO) ||
+        val realMidOnBothHalves = halves != null && midShare >= MID_PRESENT_SHARE && halves >= MID_BOTH_HALVES
+        val keepKick = (pulse != null && pulse >= FAST_PULSE_RATIO && !realMidOnBothHalves) ||
             (threeTwo && best.score < kickFit.score * OVERRIDE_SCORE_RATIO)
         return if (keepKick) kickFit else best
+    }
+
+    /**
+     * Середина (малый) на двух половинах медленной сетки: слабая / сильная. 0 — середины нет.
+     * Берём слабую к сильной, а не «на долях / между»: фаза бочки на ровных ударах может сесть на любую половину.
+     */
+    private fun midHalvesRatio(midFlux: FloatArray?, slow: Fit, hopSec: Double, duration: Double): Double {
+        if (midFlux == null) return 0.0
+        val a = midByParity(midFlux, slow.phaseSec, slow.periodSec, hopSec, duration)
+        val shifted = positiveMod(slow.phaseSec + slow.periodSec / 2.0, slow.periodSec)
+        val b = midByParity(midFlux, shifted, slow.periodSec, hopSec, duration)
+        val first = a[0] + a[1]
+        val second = b[0] + b[1]
+        val strong = maxOf(first, second)
+        return if (strong <= 1e-9) 0.0 else minOf(first, second) / strong
     }
 
     /**
@@ -945,4 +1030,38 @@ object ClickGrid {
 
     private fun diagNum(value: Double?): String =
         if (value == null || !value.isFinite()) "null" else String.format(Locale.US, "%.4f", value)
+
+    private fun diagProfile(name: String, energy: FloatArray?, hopSec: Double, period: Double, phase: Double): String {
+        if (energy == null) return "$name=null"
+        return "$name=" + profile(energy, hopSec, period, phase)
+            .joinToString(" ", "[", "]") { String.format(Locale.US, "%.2f", it) }
+    }
+
+    /**
+     * Средний рост энергии по 16 позициям на две доли: позиция 0 — точка сетки, 8 — следующая доля,
+     * 4 — восьмая после нуля. Нормирован на максимум; пустой или беззвучный вход даёт нули.
+     */
+    internal fun profile(energy: FloatArray, hopSec: Double, period: Double, phase: Double): DoubleArray {
+        val sums = DoubleArray(PROFILE_BINS)
+        val counts = IntArray(PROFILE_BINS)
+        if (energy.isEmpty() || hopSec <= 0.0 || period <= 1e-6) return sums
+        val binSec = period * 2.0 / PROFILE_BINS
+        var prev = 0f
+        for (i in energy.indices) {
+            val rise = (energy[i] - prev).coerceAtLeast(0f)
+            prev = energy[i]
+            val rel = positiveMod((i + 0.5) * hopSec - phase, period * 2.0)
+            val bin = (rel / binSec + 0.5).toInt() % PROFILE_BINS
+            sums[bin] += rise.toDouble()
+            counts[bin]++
+        }
+        var peak = 0.0
+        for (b in 0 until PROFILE_BINS) {
+            sums[b] = if (counts[b] > 0) sums[b] / counts[b] else 0.0
+            if (sums[b] > peak) peak = sums[b]
+        }
+        if (peak < 1e-12) return DoubleArray(PROFILE_BINS)
+        for (b in 0 until PROFILE_BINS) sums[b] /= peak
+        return sums
+    }
 }

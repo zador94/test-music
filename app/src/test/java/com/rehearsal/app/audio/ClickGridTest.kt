@@ -387,6 +387,14 @@ class ClickGridTest {
     }
 
     @Test
+    fun kickAndSnareOnEveryFastBeatKeepTheFastTempo() {
+        // Бочка на каждой доле, малый тоже на каждой, но на чётных сильнее. Малый на обеих половинах — быстрая сетка настоящая.
+        val grid = ClickGrid.fromPcm(kickWithAlternatingSnare(155.0))
+        assertEquals("snare on every beat halved the tempo, was ${grid.bpm}", 155.0, grid.bpm.toDouble(), 3.0)
+        assertTrue("must stay on the fast octave, was ${grid.bpm}", grid.bpm > 120f)
+    }
+
+    @Test
     fun periodHoldsTheBeatAtBothEndsOfALongTrack() {
         // Сетка одна на трек: ошибка периода копится на каждой доле и видна к последней.
         val phase = 0.20
@@ -517,10 +525,51 @@ class ClickGridTest {
     }
 
     @Test
+    fun busyHatOnTheBassDoesNotBlockTheBackbeatShift() {
+        // Хэт на басе так же громок, как малый на 2 и 4 с его слабыми ударами на 1 и 3: сумма середины на
+        // обеих половинах почти равна. Решает чередование на долях (1.0 / 0.6), а не сумма.
+        val grid = sidechainBackbeat(hiHat = 0.8f, ghost = 0.6f)
+        val err = wrapped(grid.phaseSec - SIDECHAIN_KICK_AT, grid.periodSec)
+        assertTrue("busy hat kept the phase on the bass, err=${err * 1000}ms", abs(err) < 0.030)
+    }
+
+    @Test
     fun snareOnEveryEighthKeepsThePhase() {
         val grid = sidechainBackbeat(hiHat = 0f, ghost = 0.9f)
         val err = wrapped(grid.phaseSec - (SIDECHAIN_KICK_AT + grid.periodSec / 2.0), grid.periodSec)
         assertTrue("even snare moved the phase, err=${err * 1000}ms", abs(err) < 0.030)
+    }
+
+    @Test
+    fun profilePutsEveryBeatOnBinsZeroAndEight() {
+        val profile = profileOfSpikes(period = 0.5, phase = 0.10, offset = 0.0, everyBeats = 1)
+        assertEquals(16, profile.size)
+        assertEquals(1.0, profile[0], 0.02)
+        assertEquals(1.0, profile[8], 0.02)
+        for (bin in (1..7) + (9..15)) assertEquals("bin $bin", 0.0, profile[bin], 1e-9)
+    }
+
+    @Test
+    fun profileSeparatesTheTwoBeatsOfThePair() {
+        val profile = profileOfSpikes(period = 0.5, phase = 0.10, offset = 0.0, everyBeats = 2)
+        assertEquals(1.0, profile[0], 1e-9)
+        assertEquals(0.0, profile[8], 1e-9)
+    }
+
+    @Test
+    fun profilePutsTheEighthAfterTheBeatOnBinFour() {
+        val profile = profileOfSpikes(period = 0.5, phase = 0.10, offset = 0.25, everyBeats = 2)
+        assertEquals(1.0, profile[4], 1e-9)
+        assertEquals(0.0, profile[0], 1e-9)
+        assertEquals(0.0, profile[12], 1e-9)
+    }
+
+    @Test
+    fun profileOfSilenceAndBadInputIsZeros() {
+        val zeros = DoubleArray(16)
+        assertTrue(ClickGrid.profile(FloatArray(400), 0.004, 0.5, 0.0).contentEquals(zeros))
+        assertTrue(ClickGrid.profile(FloatArray(0), 0.004, 0.5, 0.0).contentEquals(zeros))
+        assertTrue(ClickGrid.profile(FloatArray(400) { 1f }, 0.004, 0.0, 0.0).contentEquals(zeros))
     }
 
     @Test
@@ -619,6 +668,19 @@ class ClickGridTest {
         return ClickGrid.fromBands(low, mid, high, sr, duration)
     }
 
+    /** Спайки на `phase + offset + k * period`, каждый [everyBeats]-й k. */
+    private fun profileOfSpikes(period: Double, phase: Double, offset: Double, everyBeats: Int): DoubleArray {
+        val sr = 44100
+        val duration = 20.0
+        val energy = FloatArray((duration * sr / ClickGrid.HOP).toInt())
+        var k = 0
+        while (phase + offset + k * period < duration - 0.1) {
+            spike(energy, sr, phase + offset + k * period)
+            k += everyBeats
+        }
+        return ClickGrid.profile(energy, ClickGrid.HOP.toDouble() / sr, period, phase)
+    }
+
     private fun lowSpikes(bpm: Double, phaseSec: Double, beats: Int): TrackAnalysis {
         val sr = 44100
         val period = 60.0 / bpm
@@ -676,6 +738,21 @@ class ClickGridTest {
             } else {
                 burst(left, sr, t, freq = 350.0, seconds = 0.02, amp = 0.8f)
             }
+        }
+        return StereoPcm(sr, left, left.copyOf())
+    }
+
+    /** Бочка на каждой доле, малый на каждой: чётные сильнее ([evenAmp]), нечётные слабее ([oddAmp]). */
+    private fun kickWithAlternatingSnare(bpm: Double, evenAmp: Float = 1f, oddAmp: Float = 0.6f): StereoPcm {
+        val sr = 44100
+        val period = 60.0 / bpm
+        val beats = 32
+        val n = (sr * (beats * period + 0.5)).toInt()
+        val left = FloatArray(n)
+        for (beat in 0 until beats) {
+            val t = 0.05 + beat * period
+            burst(left, sr, t, freq = 70.0, seconds = 0.03, amp = 0.7f)
+            burst(left, sr, t, freq = 350.0, seconds = 0.04, amp = if (beat % 2 == 0) evenAmp else oddAmp)
         }
         return StereoPcm(sr, left, left.copyOf())
     }
