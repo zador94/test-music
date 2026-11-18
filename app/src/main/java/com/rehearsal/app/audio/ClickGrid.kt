@@ -23,6 +23,7 @@ import kotlin.math.sqrt
  * Пик выше 165 до 210 входит, если он настоящий и бочка на нём тише 0.65 медленной доли.
  * Октава бочки берёт её удвоенный период и целое в пределах 0.5. Расколотый фундаментальный пик склеивается.
  * Кратность 1.5x добавляется в 90–145 BPM, если её подтверждает пик withSnare.
+ * Оценка этой кратности — по автокорреляции ударных: withSnare только разрешает период.
  * Фаза — сдвиг с шагом 2 мс, чья сетка собирает больше энергии в окне σ = 15 мс.
  * Октаву > 140 BPM не берём, если пик малого на 70–85 BPM сильнее быстрого.
  * Фаза уточняется параболой. periodSec — период этой сетки.
@@ -32,9 +33,10 @@ import kotlin.math.sqrt
  * Фаза сдвигается на полдоли, если там малый бьёт через удар (2 и 4), а не на каждой точке.
  * Если автокорреляция ударных ниже пола на всём окне от 32.5 BPM, период ищется по басу и other,
  * но только когда у них есть один явный период, а не гребёнка близких пиков.
+ * Если и атаки пустые, период берётся из сглаженной громкости баса и other: аккорд баллады держится, а не бьёт.
  */
 object ClickGrid {
-    const val VERSION = 47
+    const val VERSION = 50
     const val SAMPLE_RATE = 44100
     /** ~4.4 мс при 44.1 кГц: общий шаг функции атаки. */
     const val HOP = 192
@@ -62,6 +64,8 @@ object ClickGrid {
     private const val DRUM_CORR_FLOOR = 0.0008f
     /** Соседний некратный пик громче этого — у сигнала нет одного периода. Skyfall-бас: 0.75. */
     private const val DOMINANT_RIVAL_RATIO = 0.72f
+    /** Огибающая аккорда: окно около 0.1 с, уже чем медиана атаки 0.2 с. */
+    private const val ENVELOPE_SIGMA = 0.04
     private const val PHASE_STEP_SEC = 0.002
     private const val SIGMA_SEC = 0.015
     private const val DOWNBEAT_BONUS = 1.30
@@ -117,6 +121,8 @@ object ClickGrid {
     private const val DIAG = "GRID_DIAG"
     private const val ACF_PEAKS = 10
     private const val PROFILE_BINS = 16
+    /** Четверть, которую слушатель считает долей, и удвоенный период огибающей. Только для лога. */
+    private val HYPOTHESIS_BPMS = doubleArrayOf(75.0, 80.0)
 
     fun isCurrent(analysis: TrackAnalysis?): Boolean {
         if (analysis == null || analysis.kickGridVersion < VERSION) return false
@@ -204,7 +210,11 @@ object ClickGrid {
         val otherOnset = onsetOf(other, drums.size, hopSec)
         val midShare = if (mid == null) 0.0 else mid.sum().toDouble() / low.sum().toDouble().coerceAtLeast(1e-9)
         val highFlux = onsetOf(high, drums.size, hopSec)
-        val fit = searchGrid(drums, kick, midFlux, highFlux, midShare, bassOnset, otherOnset, hopSec, duration)
+        val fit = searchGrid(
+            drums, kick, midFlux, highFlux, midShare, bassOnset, otherOnset, hopSec, duration,
+            rawBass = bass ?: lead,
+            rawOther = other,
+        )
         val period = fit?.periodSec?.let(::snapToIntegerBpm) ?: (60.0 / (hint?.toDouble() ?: MetronomeClickEngine.DEFAULT_BPM.toDouble()))
         val phase = positiveMod(fit?.phaseSec ?: 0.0, period)
         val bpm = PlaybackMath.committedOriginalBpm((60.0 / period).toFloat())
@@ -220,6 +230,9 @@ object ClickGrid {
                 diagProfile("mid", mid, hopSec, period, phase) + " " +
                 diagProfile("high", high, hopSec, period, phase),
         )
+        for (hypothesis in HYPOTHESIS_BPMS) {
+            Log.d(DIAG, diagHypothesis(hypothesis, low, mid, high, hopSec))
+        }
         return TrackAnalysis(
             bpm = bpm,
             beats = TrackAnalysis.quarterBeats(period, duration, phase),
@@ -324,16 +337,19 @@ object ClickGrid {
         hopSec: Double,
         duration: Double,
         allowFallback: Boolean = true,
+        rawBass: FloatArray? = null,
+        rawOther: FloatArray? = null,
     ): Fit? {
         if (activation.size < 32 || hopSec <= 0.0) return null
         if (peakOf(activation) < 1e-6f) {
             if (!allowFallback) return null
-            val body = bodyActivation(bass, other, activation.size) ?: return null
-            if (!hasDominantPeriod(body, hopSec)) {
-                Log.d(DIAG, "bass/other has no dominant period")
-                return null
+            val body = bodyActivation(bass, other, activation.size)
+            val bodyRead = if (body == null) null else dominantReadOf(body, hopSec)
+            if (body != null && isDominant(bodyRead)) {
+                return searchGrid(body, body, null, null, 0.0, null, null, hopSec, duration, allowFallback = false)
             }
-            return searchGrid(body, body, null, null, 0.0, null, null, hopSec, duration, allowFallback = false)
+            if (body != null) Log.d(DIAG, "bass/other has no dominant period ${formatContest(bodyRead)}")
+            return envelopeFit(rawBass, rawOther, body, activation.size, hopSec, duration).fit
         }
         val wide = lagRange(hopSec, activation.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0)
         if (wide == null) return null
@@ -342,17 +358,26 @@ object ClickGrid {
         val musical = maxCorrBetween(corr, hopSec, SEARCH_MIN_BPM / 2.0, FAST_SEARCH_MAX)
         if (allowFallback && musical < DRUM_CORR_FLOOR) {
             val body = bodyActivation(bass, other, activation.size)
-            if (body != null && hasDominantPeriod(body, hopSec)) {
-                Log.d(DIAG, "drums corr=${diagNum(musical.toDouble())} -> bass/other")
+            val bodyRead = if (body == null) null else dominantReadOf(body, hopSec)
+            val corrText = diagNum(musical.toDouble())
+            if (body != null && isDominant(bodyRead)) {
+                Log.d(DIAG, "drums corr=$corrText -> bass/other")
                 val retry = searchGrid(
                     body, body, null, null, 0.0, null, null, hopSec, duration, allowFallback = false,
                 )
                 if (retry != null) return retry
-            } else if (body != null) {
-                Log.d(DIAG, "drums corr=${diagNum(musical.toDouble())} bass/other has no dominant period")
+                Log.d(DIAG, "sub-floor drums c=$corrText envelope=skipped, continuing")
+            } else {
+                if (body != null) {
+                    Log.d(DIAG, "drums corr=$corrText bass/other has no dominant period ${formatContest(bodyRead)}")
+                }
+                val envelope = envelopeFit(rawBass, rawOther, body, activation.size, hopSec, duration)
+                if (envelope.fit != null) return envelope.fit
+                Log.d(DIAG, "sub-floor drums c=$corrText envelope=${envelope.miss}, continuing")
             }
         }
         Log.d(DIAG, diagAcf(corr, hopSec, wide.first, wide.second))
+        Log.d(DIAG, "kick " + diagAcf(autocorr(kickOnset, wide.first, wide.second), hopSec, wide.first, wide.second))
         val withSnare = autocorr(withSnareOnset(kickOnset, midFlux), wide.first, wide.second)
         val fundamental = doubledFundamentalBpm(corr, hopSec, wide.first, wide.second)
         val kick = pullBpm(kickPeriod(kickOnset, midFlux, hopSec), fundamental)
@@ -563,7 +588,7 @@ object ClickGrid {
      * Сумма попаданий выбирает период, кроме октавы и полиритма 3:2 бочки.
      * Восьмая (период / 2), половинный темп (× 2), 2:3 и 3:2 могут остаться на периоде низа:
      * сумма ударов взяла бы более частую сетку, а пунктир/синкопа — ложный 3:2.
-     * Октаву решает [fastPulseRatio] и середина: отношение очков для неё не разделяет случаи (сетка вдвое чаще
+     * Октаву решает [kickPulse] и середина: отношение очков для неё не разделяет случаи (сетка вдвое чаще
      * набирает почти вдвое больше). Бочка на быстрой доле остаётся на медленном темпе, если только
      * настоящий малый не бьёт на обеих половинах медленной сетки ([midHalvesRatio]).
      * 3:2 решает отношение очков: пунктир слабее [OVERRIDE_SCORE_RATIO].
@@ -586,24 +611,34 @@ object ClickGrid {
             near(best.periodSec, kickPeriod * 2.0, 0.03)
         val threeTwo = near(best.periodSec, kickPeriod * 2.0 / 3.0, 0.03) ||
             near(best.periodSec, kickPeriod * 3.0 / 2.0, 0.03)
-        val pulse = if (octave) fastPulseRatio(kickOnset, best.periodSec, kickFit.periodSec, hopSec) else null
-        val halves = if (pulse != null && pulse >= FAST_PULSE_RATIO) {
+        val pulse = if (octave) kickPulse(kickOnset, best.periodSec, kickFit.periodSec, hopSec) else null
+        val halves = if (pulse != null && pulse.ratio >= FAST_PULSE_RATIO) {
             midHalvesRatio(midFlux, if (best.periodSec > kickFit.periodSec) best else kickFit, hopSec, duration)
         } else {
             null
+        }
+        val realMidOnBothHalves = halves != null && midShare >= MID_PRESENT_SHARE && halves >= MID_BOTH_HALVES
+        // 1.09 и половины 0.57 при корреляции 0.0006 — это ровный шум, не малый на каждой доле.
+        val octaveBelowFloor = pulse != null && pulse.slow > 0f && pulse.slow < DRUM_CORR_FLOOR
+        val choice = choiceDiag(
+            octave, threeTwo, pulse?.ratio, realMidOnBothHalves, best.score, kickFit.score, octaveBelowFloor,
+        )
+        val picked = if (choice.keepKick) kickFit else best
+        val kickLock = diagOnOff(kickOnset, picked.phaseSec, picked.periodSec, hopSec, duration)
+        val midLock = if (midFlux == null) {
+            "null"
+        } else {
+            diagOnOff(midFlux, picked.phaseSec, picked.periodSec, hopSec, duration)
         }
         Log.d(
             DIAG,
             "choose best=${diagNum(60.0 / best.periodSec)} kickFit=${diagNum(60.0 / kickFit.periodSec)} " +
                 "related=${octave || threeTwo} ratio=${diagNum(best.score / kickFit.score)} " +
-                "fastPulse=${diagNum(pulse)} midShare=${diagNum(midShare)} midHalves=${diagNum(halves)}",
+                "fastPulse=${diagNum(pulse?.ratio)} slowC=${diagNum(pulse?.slow?.toDouble())} " +
+                "midShare=${diagNum(midShare)} midHalves=${diagNum(halves)} " +
+                "${choice.text} lock kick=$kickLock mid=$midLock",
         )
-        val realMidOnBothHalves = halves != null && midShare >= MID_PRESENT_SHARE && halves >= MID_BOTH_HALVES
-        val keepUnrelated = !octave && !threeTwo && best.score < kickFit.score * UNRELATED_WIN_RATIO
-        val keepKick = (pulse != null && pulse >= FAST_PULSE_RATIO && !realMidOnBothHalves) ||
-            (threeTwo && best.score < kickFit.score * OVERRIDE_SCORE_RATIO) ||
-            keepUnrelated
-        return alignFastOctave(if (keepKick) kickFit else best, kickBpm)
+        return alignFastOctave(picked, kickBpm)
     }
 
     /** Быстрая октава садится на удвоенную бочку, не на соседний пик смеси. 155.47 → 155. */
@@ -632,37 +667,46 @@ object ClickGrid {
         return if (strong <= 1e-9) 0.0 else minOf(first, second) / strong
     }
 
+    private class KickPulse(val ratio: Double, val slow: Float)
+
     /**
      * Автокорреляция атак бочки на быстром лаге / на медленном. Близко к 1 — бочка бьёт и на быстрой доле,
      * быстрая сетка тогда восьмые. Мало — на быстрых долях бьёт малый, быстрая сетка это четверть.
+     * [KickPulse.slow] ниже пола — отношение само шум: 1.09 не отличает восьмые от пустой сетки.
      */
-    private fun fastPulseRatio(kickOnset: FloatArray, periodA: Double, periodB: Double, hopSec: Double): Double {
+    private fun kickPulse(kickOnset: FloatArray, periodA: Double, periodB: Double, hopSec: Double): KickPulse {
         val fastLag = (minOf(periodA, periodB) / hopSec).roundToInt()
         val slowLag = (maxOf(periodA, periodB) / hopSec).roundToInt()
         val minLag = (fastLag * 0.9).toInt()
         val maxLag = (slowLag * 1.1).toInt()
-        if (minLag < 1 || maxLag >= kickOnset.size / 2) return 0.0
+        if (minLag < 1 || maxLag >= kickOnset.size / 2) return KickPulse(0.0, Float.POSITIVE_INFINITY)
         val corr = autocorr(kickOnset, minLag, maxLag)
         val slow = peakNear(corr, slowLag, minLag, maxLag)
-        if (slow <= 0f) return 0.0
-        return (peakNear(corr, fastLag, minLag, maxLag) / slow).toDouble()
+        if (slow <= 0f) return KickPulse(0.0, Float.POSITIVE_INFINITY)
+        return KickPulse((peakNear(corr, fastLag, minLag, maxLag) / slow).toDouble(), slow)
     }
 
     private fun kickPeriod(drums: FloatArray, midFlux: FloatArray?, hopSec: Double): Double? {
         if (peakOf(drums) < 1e-6f) return null
+        val wide = lagRange(hopSec, drums.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM) ?: return null
+        val corr = autocorr(drums, wide.first, wide.second)
         val range = lagRange(hopSec, drums.size, SEARCH_MIN_BPM, SEARCH_MAX_BPM) ?: return null
-        val corr = autocorr(drums, range.first, range.second)
         val lag = octaveLag(corr, drums, midFlux, hopSec, range.first, range.second)
-        if (lag < 0 || corr[lag] <= 0f) return null
-        val refined = (lag + parabolic(corr, lag, range.first, range.second)) * hopSec
-        val bpm = 60.0 / refined
-        if (bpm < SEARCH_MIN_BPM || bpm > SEARCH_MAX_BPM) return null
-        return bpm
+        val inRange = if (lag < 0 || corr[lag] <= 0f) {
+            null
+        } else {
+            val refined = (lag + parabolic(corr, lag, range.first, range.second)) * hopSec
+            val bpm = 60.0 / refined
+            if (bpm < SEARCH_MIN_BPM || bpm > SEARCH_MAX_BPM) null else bpm
+        }
+        if (inRange != null && corr[lag] >= DRUM_CORR_FLOOR) return inRange
+        return doubledFundamentalBpm(corr, hopSec, wide.first, wide.second) ?: inRange
     }
 
     /**
      * Самый сильный пик ниже 65 BPM, удвоенный в окно поиска.
-     * 47.5 → 95. Пик уже внутри 65–165 не трогаем: это и есть темп.
+     * 47.5 → 95. Пик уже внутри 65–165 не трогаем, если он выше пола: это и есть темп.
+     * Ниже пола один всплеск половины равен шуму внутри окна (0.0007 против 0.0006), и порог 1.2 его съедает.
      */
     private fun doubledFundamentalBpm(corr: FloatArray, hopSec: Double, minLag: Int, maxLag: Int): Double? {
         if (hopSec <= 0.0 || maxLag <= minLag + 1) return null
@@ -681,7 +725,7 @@ object ClickGrid {
                 bestBelowC = c
             }
         }
-        if (bestBelow < 0 || bestBelowC < bestInRange * 1.2f) return null
+        if (bestBelow < 0 || !halfNoteBeatsInRange(bestBelowC, bestInRange)) return null
         var bpm = 60.0 / ((bestBelow + parabolic(corr, bestBelow, minLag, maxLag)) * hopSec)
         while (bpm < SEARCH_MIN_BPM) bpm *= 2.0
         if (bpm > SEARCH_MAX_BPM) return null
@@ -692,6 +736,16 @@ object ClickGrid {
             if (peakNear(corr, lag, minLag, maxLag) >= bestBelowC * 0.5f) return null
         }
         return bpm
+    }
+
+    /**
+     * Половина перебивает пик внутри 65–165.
+     * Выше пола нужен запас 1.2: 47.5 громче 95. Ниже пола высоты равны шуму, и 1.17 уже достаточно.
+     */
+    internal fun halfNoteBeatsInRange(below: Float, inRange: Float): Boolean {
+        if (below <= 0f) return false
+        if (inRange < DRUM_CORR_FLOOR) return below >= inRange
+        return below >= inRange * 1.2f
     }
 
     private fun pullBpm(bpm: Double?, fundamentalBpm: Double?): Double? {
@@ -721,20 +775,134 @@ object ClickGrid {
     }
 
     /**
-     * Один период, а не гребёнка. Соседний пик, не кратный лучшему, должен быть тише [DOMINANT_RIVAL_RATIO].
-     * Кратности 1/3, 1/2, 2/3, 3/2, 2 и 3 — гармоники того же темпа.
+     * Громкость баса и other, когда атаки периода не дают.
+     * Берём пик, только если он один. Фаза — на громком месте огибающей.
      */
-    private fun hasDominantPeriod(activation: FloatArray, hopSec: Double): Boolean {
-        val wide = lagRange(hopSec, activation.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0) ?: return false
-        val corr = autocorr(activation, wide.first, wide.second)
-        var bestBpm = 0.0
-        var bestC = 0f
+    private class EnvelopeHit(val fit: Fit?, val miss: String)
+
+    private fun envelopeFit(
+        bass: FloatArray?,
+        other: FloatArray?,
+        onsets: FloatArray?,
+        n: Int,
+        hopSec: Double,
+        duration: Double,
+    ): EnvelopeHit {
+        val raw = bodyActivation(fitLength(bass, n), fitLength(other, n), n) ?: return EnvelopeHit(null, "none")
+        val env = normalize(gaussianSmooth(raw, hopSec, ENVELOPE_SIGMA))
+        val wide = lagRange(hopSec, env.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0)
+            ?: return EnvelopeHit(null, "none")
+        val corr = autocorr(env, wide.first, wide.second)
+        Log.d(DIAG, "envelope " + diagAcf(corr, hopSec, wide.first, wide.second))
+        val bpm = dominantBpm(corr, hopSec, wide.first, wide.second)
+        if (bpm == null) {
+            Log.d(DIAG, "envelope has no dominant period")
+            return EnvelopeHit(null, "no-period")
+        }
+        val folded = foldIntoSearch(bpm)
+        if (folded == null) {
+            Log.d(DIAG, "envelope bpm=${diagNum(bpm)} outside search")
+            return EnvelopeHit(null, "out-of-range")
+        }
+        val repeat = blurredAttack(onsets, folded, hopSec)
+        if (repeat != null) {
+            val ratio = repeat.corr / repeat.bestC
+            Log.d(
+                DIAG,
+                "envelope bpm=${diagNum(folded)} repeats an attack " +
+                    "rivalBpm=${diagNum(repeat.bpm)} c=${diagNum(repeat.corr.toDouble())} " +
+                    "bestC=${diagNum(repeat.bestC.toDouble())} ratio=${diagNum(ratio.toDouble())}",
+            )
+            return EnvelopeHit(null, "rejected")
+        }
+        val period = 60.0 / folded
+        val phase = bestPhase(env, null, null, 0f, 0f, period, hopSec, duration).phase
+        Log.d(DIAG, "envelope bpm=${diagNum(folded)} period=${diagNum(period)} phase=${diagNum(phase)}")
+        return EnvelopeHit(Fit(period, phase, 0.0, null), "ok")
+    }
+
+    /** 84 у гребёнки шипов — это половина атак на 168. Такой пик огибающая не приносит. */
+    private fun blurredAttack(onsets: FloatArray?, envelopeBpm: Double, hopSec: Double): AttackRepeat? {
+        if (onsets == null || envelopeBpm <= 0.0) return null
+        val wide = lagRange(hopSec, onsets.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0) ?: return null
+        val corr = autocorr(onsets, wide.first, wide.second)
         val peaks = ArrayList<Pair<Double, Float>>()
         val last = minOf(wide.second, corr.lastIndex - 1)
         for (lag in (wide.first + 1) until last) {
             val c = corr[lag]
             if (c <= 0f || c < corr[lag - 1] || c < corr[lag + 1]) continue
             val period = (lag + parabolic(corr, lag, wide.first, wide.second)) * hopSec
+            if (period <= 1e-6) continue
+            peaks.add(60.0 / period to c)
+        }
+        return repeatingAttack(peaks, envelopeBpm)
+    }
+
+    private class AttackRepeat(val bpm: Double, val corr: Float, val bestC: Float)
+
+    /** Только удвоение: огибающая повторила смазанные атаки. Совпадение периода — это сам аккорд. */
+    private fun repeatingAttack(peaks: List<Pair<Double, Float>>, envelopeBpm: Double): AttackRepeat? {
+        if (envelopeBpm <= 0.0) return null
+        var bestC = 0f
+        for ((_, c) in peaks) if (c > bestC) bestC = c
+        if (bestC <= 0f) return null
+        var rivalBpm = 0.0
+        var rivalC = 0f
+        for ((bpm, c) in peaks) {
+            if (c < bestC * 0.80f) continue
+            if (near(bpm, envelopeBpm * 2.0, 0.03) || near(bpm, envelopeBpm * 4.0, 0.03)) {
+                if (c > rivalC) {
+                    rivalC = c
+                    rivalBpm = bpm
+                }
+            }
+        }
+        if (rivalC <= 0f) return null
+        return AttackRepeat(rivalBpm, rivalC, bestC)
+    }
+
+    /** Пик ниже 65 удваивается, пока не войдёт в окно. 37.5 → 75. Быстрее 165 не делим: это смазанные атаки. */
+    private fun foldIntoSearch(bpm: Double): Double? {
+        var value = bpm
+        var guard = 0
+        while (value < SEARCH_MIN_BPM && guard++ < 4) value *= 2.0
+        return if (value in SEARCH_MIN_BPM..SEARCH_MAX_BPM) value else null
+    }
+
+    /**
+     * Один период, а не гребёнка. Соседний пик, не кратный лучшему, должен быть тише [DOMINANT_RIVAL_RATIO].
+     * Кратности 1/3, 1/2, 2/3, 3/2, 2 и 3 — гармоники того же темпа.
+     */
+    private class DominantRead(
+        val bestBpm: Double,
+        val bestC: Float,
+        val rivalBpm: Double?,
+        val rivalC: Float,
+    )
+
+    private fun dominantReadOf(activation: FloatArray, hopSec: Double): DominantRead? {
+        val wide = lagRange(hopSec, activation.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0) ?: return null
+        return readDominant(autocorr(activation, wide.first, wide.second), hopSec, wide.first, wide.second)
+    }
+
+    /** Соседний некратный пик тише [DOMINANT_RIVAL_RATIO] от лучшего. */
+    private fun isDominant(read: DominantRead?): Boolean =
+        read != null && read.rivalC < read.bestC * DOMINANT_RIVAL_RATIO
+
+    private fun dominantBpm(corr: FloatArray, hopSec: Double, minLag: Int, maxLag: Int): Double? {
+        val read = readDominant(corr, hopSec, minLag, maxLag) ?: return null
+        return if (isDominant(read)) read.bestBpm else null
+    }
+
+    private fun readDominant(corr: FloatArray, hopSec: Double, minLag: Int, maxLag: Int): DominantRead? {
+        var bestBpm = 0.0
+        var bestC = 0f
+        val peaks = ArrayList<Pair<Double, Float>>()
+        val last = minOf(maxLag, corr.lastIndex - 1)
+        for (lag in (minLag + 1) until last) {
+            val c = corr[lag]
+            if (c <= 0f || c < corr[lag - 1] || c < corr[lag + 1]) continue
+            val period = (lag + parabolic(corr, lag, minLag, maxLag)) * hopSec
             if (period <= 1e-6) continue
             val bpm = 60.0 / period
             peaks.add(bpm to c)
@@ -743,13 +911,17 @@ object ClickGrid {
                 bestBpm = bpm
             }
         }
-        if (bestC <= 0f) return false
+        if (bestC <= 0f) return null
         var rival = 0f
+        var rivalBpm: Double? = null
         for ((bpm, c) in peaks) {
             if (harmonicOf(bpm, bestBpm)) continue
-            if (c > rival) rival = c
+            if (c > rival) {
+                rival = c
+                rivalBpm = bpm
+            }
         }
-        return rival < bestC * DOMINANT_RIVAL_RATIO
+        return DominantRead(bestBpm, bestC, rivalBpm, rival)
     }
 
     private fun harmonicOf(bpm: Double, fundamental: Double): Boolean {
@@ -803,7 +975,7 @@ object ClickGrid {
             // Восьмая с тихим низом (малый на «и» у 105) тоже даёт пик около 210.
             // Пускаем его только если бочка на этой доле почти не бьёт — иначе это не четверть.
             if (bpm > SEARCH_MAX_BPM && bpm <= FAST_SEARCH_MAX && c >= DRUM_CORR_FLOOR &&
-                fastPulseRatio(kickOnset, period, period * 2.0, hopSec) < FAST_KICK_ON_EIGHTH
+                kickPulse(kickOnset, period, period * 2.0, hopSec).ratio < FAST_KICK_ON_EIGHTH
             ) {
                 fastPeaks.add(period to c)
             }
@@ -817,7 +989,7 @@ object ClickGrid {
                 val foldedBpm = 60.0 / foldedPeriod
                 if (foldedBpm < SEARCH_MIN_BPM || foldedBpm > SEARCH_MAX_BPM) continue
                 if (dotted && (foldedBpm < 90.0 || foldedBpm > 145.0)) continue
-                found.add(foldedPeriod to tempoScore(source, foldedBpm, hopSec, minLag, maxLag))
+                found.add(foldedPeriod to tempoScore(corr, foldedBpm, hopSec, minLag, maxLag))
             }
         }
         if (bestInRange > 0f) {
@@ -828,13 +1000,13 @@ object ClickGrid {
             }
         }
         found.sortByDescending { it.second }
-        val picked = ArrayList<Double>(4)
+        val ranked = ArrayList<Pair<Double, Float>>(found.size)
         for (item in found) {
-            if (picked.any { near(it, item.first, 0.03) }) continue
-            picked.add(item.first)
-            if (picked.size == 4) break
+            if (ranked.any { near(it.first, item.first, 0.03) }) continue
+            ranked.add(item)
         }
-        return picked
+        Log.d(DIAG, diagFolds(ranked))
+        return ranked.take(4).map { it.first }
     }
 
     private fun tempoScore(
@@ -1260,6 +1432,123 @@ object ClickGrid {
 
     private fun diagNum(value: Double?): String =
         if (value == null || !value.isFinite()) "null" else String.format(Locale.US, "%.4f", value)
+
+    internal class ChoiceDiag(val keepKick: Boolean, val text: String)
+
+    /** Та же развилка, что [choose]: строка лога не может разойтись с тем, кого оставили. */
+    internal fun choiceDiag(
+        octave: Boolean,
+        threeTwo: Boolean,
+        pulse: Double?,
+        realMidOnBothHalves: Boolean,
+        bestScore: Double,
+        kickScore: Double,
+        octaveBelowFloor: Boolean = false,
+    ): ChoiceDiag {
+        val keepUnrelated = !octave && !threeTwo && bestScore < kickScore * UNRELATED_WIN_RATIO
+        val keepKick = octaveBelowFloor ||
+            (pulse != null && pulse >= FAST_PULSE_RATIO && !realMidOnBothHalves) ||
+            (threeTwo && bestScore < kickScore * OVERRIDE_SCORE_RATIO) ||
+            keepUnrelated
+        val reason = when {
+            octave -> "octave"
+            threeTwo -> "threeTwo"
+            else -> "unrelated"
+        }
+        val who = if (keepKick) "kick" else "best"
+        return ChoiceDiag(keepKick, "keep=$who reason=$reason")
+    }
+
+    private fun diagOnOff(
+        flux: FloatArray,
+        phase: Double,
+        period: Double,
+        hopSec: Double,
+        duration: Double,
+    ): String {
+        val on = midByParity(flux, phase, period, hopSec, duration).sum()
+        val off = midByParity(flux, positiveMod(phase + period / 2.0, period), period, hopSec, duration).sum()
+        return if (off <= 1e-9) "inf" else diagNum(on / off)
+    }
+
+    internal fun diagFolds(ranked: List<Pair<Double, Float>>): String {
+        if (ranked.isEmpty()) return "fold none"
+        return "fold " + ranked.take(ACF_PEAKS).joinToString(" | ") { (period, score) ->
+            "bpm=${diagNum(60.0 / period)} s=${String.format(Locale.US, "%.6f", score)}"
+        }
+    }
+
+    private fun formatContest(read: DominantRead?): String {
+        if (read == null) return "best=null"
+        val ratio = if (read.rivalBpm == null || read.bestC <= 1e-12f) {
+            null
+        } else {
+            read.rivalC.toDouble() / read.bestC
+        }
+        return "best=${diagNum(read.bestBpm)} c=${diagNum(read.bestC.toDouble())} " +
+            "rival=${diagNum(read.rivalBpm)} c=${diagNum(read.rivalC.toDouble())} ratio=${diagNum(ratio)}"
+    }
+
+    internal fun diagContest(corr: FloatArray, hopSec: Double, minLag: Int, maxLag: Int): String =
+        formatContest(readDominant(corr, hopSec, minLag, maxLag))
+
+    internal fun contestIsDominant(corr: FloatArray, hopSec: Double, minLag: Int, maxLag: Int): Boolean =
+        isDominant(readDominant(corr, hopSec, minLag, maxLag))
+
+    internal fun diagAttackRepeat(peaks: List<Pair<Double, Float>>, envelopeBpm: Double): String? {
+        val repeat = repeatingAttack(peaks, envelopeBpm) ?: return null
+        val ratio = repeat.corr / repeat.bestC
+        return "rivalBpm=${diagNum(repeat.bpm)} c=${diagNum(repeat.corr.toDouble())} " +
+            "bestC=${diagNum(repeat.bestC.toDouble())} ratio=${diagNum(ratio.toDouble())}"
+    }
+
+    private fun diagHypothesis(
+        bpm: Double,
+        low: FloatArray,
+        mid: FloatArray?,
+        high: FloatArray?,
+        hopSec: Double,
+    ): String {
+        val period = 60.0 / bpm
+        val shift = profileShift(low, hopSec, bpm)
+        return "hypothesis bpm=${diagNum(bpm)} bin0=strongest low: " +
+            diagBand("low", low, hopSec, period, shift) + " " +
+            diagBand("mid", mid, hopSec, period, shift) + " " +
+            diagBand("high", high, hopSec, period, shift)
+    }
+
+    private fun diagBand(
+        name: String,
+        energy: FloatArray?,
+        hopSec: Double,
+        period: Double,
+        shift: Int,
+    ): String {
+        if (energy == null) return "$name=null"
+        val turned = rotateProfile(profile(energy, hopSec, period, 0.0), shift)
+        return "$name=" + turned.joinToString(" ", "[", "]") { String.format(Locale.US, "%.2f", it) }
+    }
+
+    /** bin0 — самая сильная корзина этого BPM, а не фаза уже выбранной сетки. */
+    internal fun profileAligned(energy: FloatArray, hopSec: Double, bpm: Double): DoubleArray {
+        val period = if (bpm <= 1e-6) 0.0 else 60.0 / bpm
+        return rotateProfile(profile(energy, hopSec, period, 0.0), profileShift(energy, hopSec, bpm))
+    }
+
+    private fun profileShift(energy: FloatArray, hopSec: Double, bpm: Double): Int {
+        if (bpm <= 1e-6 || hopSec <= 0.0) return 0
+        val raw = profile(energy, hopSec, 60.0 / bpm, 0.0)
+        var shift = 0
+        for (i in 1 until raw.size) if (raw[i] > raw[shift]) shift = i
+        return if (raw[shift] <= 0.0) 0 else shift
+    }
+
+    private fun rotateProfile(raw: DoubleArray, shift: Int): DoubleArray {
+        if (raw.isEmpty() || shift == 0) return raw
+        val n = raw.size
+        val k = ((shift % n) + n) % n
+        return DoubleArray(n) { raw[(it + k) % n] }
+    }
 
     /**
      * Сильнейшие локальные максимумы автокорреляции ударных.

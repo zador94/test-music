@@ -6,6 +6,7 @@ import org.junit.Test
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -67,6 +68,23 @@ class ClickGridTest {
         val grid = ClickGrid.fromPcm(backbeat(102.0))
         assertEquals("backbeat was ${grid.bpm}", 102.0, grid.bpm.toDouble(), 2.0)
         assertTrue("must not sit on 68, was ${grid.bpm}", abs(grid.bpm - 68f) > 8f)
+    }
+
+    @Test
+    fun halfTimeKickBelowTheSearchWindowBecomesTheQuarter() {
+        val grid = ClickGrid.fromPcm(backbeat(75.0))
+        assertEquals("half-time kick stayed off 75, was ${grid.bpm}", 75.0, grid.bpm.toDouble(), 2.0)
+        assertTrue("must not sit on the dotted 93, was ${grid.bpm}", abs(grid.bpm - 93f) > 8f)
+    }
+
+    @Test
+    fun halfNoteUnderTheFloorBeatsAnEqualInRangePeak() {
+        assertTrue(ClickGrid.halfNoteBeatsInRange(0.0007f, 0.0006f))
+        assertTrue(ClickGrid.halfNoteBeatsInRange(0.0004f, 0.0004f))
+        assertTrue(ClickGrid.halfNoteBeatsInRange(0.0016f, 0.0005f))
+        assertTrue(!ClickGrid.halfNoteBeatsInRange(0.0010f, 0.0013f))
+        assertTrue(!ClickGrid.halfNoteBeatsInRange(0.0005f, 0.0007f))
+        assertTrue(!ClickGrid.halfNoteBeatsInRange(0f, 0f))
     }
 
     @Test
@@ -661,6 +679,36 @@ class ClickGridTest {
     }
 
     @Test
+    fun swellAtSeventyFiveSurvivesACombOfAttacks() {
+        val bpm = 75.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beats = 32
+        val duration = 0.20 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        val hopSec = ClickGrid.HOP.toDouble() / sr
+        for (i in bass.indices) {
+            val phase = (i * hopSec - 0.20) / period
+            if (phase >= 0.0 && phase < beats) {
+                val x = phase % 1.0
+                bass[i] = (0.5 - 0.5 * cos(2.0 * PI * x)).toFloat()
+            }
+        }
+        var state = 1
+        for (i in bass.indices) {
+            state = (state * 1103515245 + 12345) and 0x7fffffff
+            if (state % 12 == 0) bass[i] = 1f
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass)
+        assertEquals("swell stayed hidden, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        val crest = 0.20 + period / 2.0
+        val err = wrapped(grid.phaseSec - crest, grid.periodSec)
+        assertTrue("swell phase off by ${err * 1000}ms", abs(err) < 0.08)
+    }
+
+    @Test
     fun drumPulseAtNinetyFiveBeatsACombBass() {
         val sr = 44100
         val bpm = 95.0
@@ -739,6 +787,110 @@ class ClickGridTest {
     }
 
     @Test
+    fun choiceKeepsKickOnAWeakThreeTwoAndOnAnUnrelatedTempo() {
+        val dotted = ClickGrid.choiceDiag(false, true, null, false, 95.3313, 70.8463)
+        assertTrue(dotted.keepKick)
+        assertEquals("keep=kick reason=threeTwo", dotted.text)
+        val strong = ClickGrid.choiceDiag(false, true, null, false, 180.0, 100.0)
+        assertTrue(!strong.keepKick)
+        assertEquals("keep=best reason=threeTwo", strong.text)
+        val unrelated = ClickGrid.choiceDiag(false, false, null, false, 114.0, 100.0)
+        assertTrue(unrelated.keepKick)
+        assertEquals("keep=kick reason=unrelated", unrelated.text)
+        val won = ClickGrid.choiceDiag(false, false, null, false, 115.0, 100.0)
+        assertTrue(!won.keepKick)
+        assertEquals("keep=best reason=unrelated", won.text)
+    }
+
+    @Test
+    fun choiceKeepsTheSlowKickWhenTheKickAlsoHitsTheFastBeat() {
+        val eighths = ClickGrid.choiceDiag(true, false, 0.98, false, 200.0, 100.0)
+        assertTrue(eighths.keepKick)
+        assertEquals("keep=kick reason=octave", eighths.text)
+        val backbeat = ClickGrid.choiceDiag(true, false, 0.44, false, 200.0, 100.0)
+        assertTrue(!backbeat.keepKick)
+        assertEquals("keep=best reason=octave", backbeat.text)
+        val snareOnBoth = ClickGrid.choiceDiag(true, false, 0.98, true, 200.0, 100.0)
+        assertTrue(!snareOnBoth.keepKick)
+        assertEquals("keep=best reason=octave", snareOnBoth.text)
+        val noise = ClickGrid.choiceDiag(true, false, 1.094, true, 107.2, 64.8, octaveBelowFloor = true)
+        assertTrue(noise.keepKick)
+        assertEquals("keep=kick reason=octave", noise.text)
+    }
+
+    @Test
+    fun contestNamesTheNonHarmonicRivalAndRejectsACloseOne() {
+        val hop = 0.004
+        val corr = FloatArray(420)
+        peak(corr, 150, 10f)
+        peak(corr, 75, 9f)
+        peak(corr, 100, 8f)
+        peak(corr, 120, 8f)
+        assertEquals(
+            "best=100.0000 c=10.0000 rival=125.0000 c=8.0000 ratio=0.8000",
+            ClickGrid.diagContest(corr, hop, 2, 400),
+        )
+        assertTrue(!ClickGrid.contestIsDominant(corr, hop, 2, 400))
+        peak(corr, 120, 5f)
+        assertEquals(
+            "best=100.0000 c=10.0000 rival=125.0000 c=5.0000 ratio=0.5000",
+            ClickGrid.diagContest(corr, hop, 2, 400),
+        )
+        assertTrue(ClickGrid.contestIsDominant(corr, hop, 2, 400))
+        val alone = FloatArray(420)
+        peak(alone, 150, 10f)
+        assertEquals(
+            "best=100.0000 c=10.0000 rival=null c=0.0000 ratio=null",
+            ClickGrid.diagContest(alone, hop, 2, 400),
+        )
+        assertEquals("best=null", ClickGrid.diagContest(FloatArray(20), hop, 2, 18))
+    }
+
+    @Test
+    fun attackRepeatReportsTheDoubleThatIsCloseToTheBestPeak() {
+        assertEquals(
+            "rivalBpm=160.0000 c=10.0000 bestC=10.0000 ratio=1.0000",
+            ClickGrid.diagAttackRepeat(listOf(160.0 to 10f, 100.0 to 4f), 80.0),
+        )
+        assertEquals(
+            "rivalBpm=320.0000 c=9.0000 bestC=10.0000 ratio=0.9000",
+            ClickGrid.diagAttackRepeat(listOf(320.0 to 9f, 100.0 to 10f), 80.0),
+        )
+        assertTrue(ClickGrid.diagAttackRepeat(listOf(160.0 to 7f, 100.0 to 10f), 80.0) == null)
+        assertTrue(ClickGrid.diagAttackRepeat(listOf(150.0 to 10f), 80.0) == null)
+    }
+
+    @Test
+    fun diagFoldsKeepsTheTenHighestDistinctPeriods() {
+        val ranked = ArrayList<Pair<Double, Float>>()
+        val scores = floatArrayOf(0.5f, 0.25f, 0.125f, 0.0625f, 0.03125f, 0.015625f, 0.0078125f, 0.00390625f, 0.001953125f, 0.0009765625f, 0.00048828125f)
+        for (i in scores.indices) ranked.add((60.0 / (70.0 + i)) to scores[i])
+        val parts = ClickGrid.diagFolds(ranked).removePrefix("fold ").split(" | ")
+        assertEquals(10, parts.size)
+        assertEquals("bpm=70.0000 s=0.500000", parts[0])
+        assertEquals("bpm=79.0000 s=0.000977", parts[9])
+        assertEquals("fold none", ClickGrid.diagFolds(emptyList()))
+    }
+
+    @Test
+    fun profileAlignedPutsTheStrongestBinOnZero() {
+        val hop = ClickGrid.HOP.toDouble() / 44100
+        val period = 60.0 / 75.0
+        val energy = FloatArray((8 * period / hop).toInt() + 2)
+        var t = 0.2
+        while (t < energy.size * hop) {
+            val i = (t / hop).toInt()
+            if (i in energy.indices) energy[i] = 1f
+            t += period
+        }
+        val raw = ClickGrid.profile(energy, hop, period, 0.0)
+        assertTrue(raw[0] < 1.0)
+        val aligned = ClickGrid.profileAligned(energy, hop, 75.0)
+        assertEquals(1.0, aligned[0], 1e-9)
+        assertTrue(aligned[1] < 1.0)
+    }
+
+    @Test
     fun profileOfSilenceAndBadInputIsZeros() {
         val zeros = DoubleArray(16)
         assertTrue(ClickGrid.profile(FloatArray(400), 0.004, 0.5, 0.0).contentEquals(zeros))
@@ -751,6 +903,12 @@ class ClickGridTest {
         val stale = TrackAnalysis.grid(120f).copy(kickGridVersion = ClickGrid.VERSION - 1)
         assertTrue(!ClickGrid.isCurrent(stale))
         assertTrue(!ClickGrid.isCurrent(null))
+    }
+
+    private fun peak(corr: FloatArray, lag: Int, c: Float) {
+        corr[lag] = c
+        corr[lag - 1] = c * 0.5f
+        corr[lag + 1] = c * 0.5f
     }
 
     private fun acfPeak(lag: Int, hop: Double, c: Float): String {
