@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rehearsal.app.RehearsalApplication
 import com.rehearsal.app.data.TrackEntity
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,6 +33,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _openProcessing = MutableSharedFlow<String>()
     val openProcessing = _openProcessing.asSharedFlow()
+
+    private val _tempoRecalc = MutableStateFlow<TempoRecalcProgress?>(null)
+    val tempoRecalc: StateFlow<TempoRecalcProgress?> = _tempoRecalc.asStateFlow()
+
+    private var tempoRecalcJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -64,4 +70,34 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             app.repository.delete(id)
         }
     }
+
+    /** Та же сила, что кнопка в плеере, но по очереди для каждой песни с ударными. */
+    fun recalculateAllTempos() {
+        if (tempoRecalcJob?.isActive == true) return
+        tempoRecalcJob = viewModelScope.launch {
+            val ids = TempoRecalc.ids(tracks.value)
+            if (ids.isEmpty()) {
+                _messages.emit("Нет песен с готовыми ударными")
+                return@launch
+            }
+            _tempoRecalc.value = TempoRecalcProgress(0, ids.size)
+            try {
+                ids.forEachIndexed { index, id ->
+                    app.repository.refreshKickGrid(id, force = true)
+                    _tempoRecalc.value = TempoRecalcProgress(index + 1, ids.size)
+                }
+            } finally {
+                _tempoRecalc.value = null
+            }
+        }
+    }
+}
+
+/** Сколько песен уже пройдено общей кнопкой. `null` — кнопка свободна. */
+data class TempoRecalcProgress(val done: Int, val total: Int)
+
+internal object TempoRecalc {
+    /** Ударные уже лежат на диске. Без них темп заново не из чего считать, HT-Demucs не трогаем. */
+    fun ids(tracks: List<TrackEntity>): List<String> =
+        tracks.filter { !it.drumsPath.isNullOrBlank() }.map { it.id }
 }

@@ -3,6 +3,7 @@ package com.rehearsal.app.audio
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -541,6 +542,152 @@ class ClickGridTest {
     }
 
     @Test
+    fun fastBackbeatAboveTheCapKeepsTwoHundred() {
+        val bpm = 200.0
+        val quarter = 60.0 / bpm
+        val sr = 44100
+        val beats = 64
+        val duration = 0.20 + beats * quarter + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        repeat(beats) { i ->
+            val t = 0.20 + i * quarter
+            if (i % 2 == 0) spike(low, sr, t, 1f) else spike(mid, sr, t, 1f)
+        }
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration)
+        assertEquals("200 was halved, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+    }
+
+    @Test
+    fun splitFundamentalBeatsANearUnrelatedTempo() {
+        val sr = 44100
+        val slow = 60.0 / 94.0
+        val fast = 60.0 / 96.0
+        val beats = 48
+        val duration = 0.20 + beats * (slow + fast) / 2.0 + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        var t = 0.20
+        repeat(beats) { i ->
+            spike(low, sr, t, 1f)
+            t += if (i % 2 == 0) slow else fast
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration)
+        assertEquals("split 94/96 left ${grid.bpm}", 95.0, grid.bpm.toDouble(), 1.0)
+        assertTrue("unrelated tempo won, was ${grid.bpm}", abs(grid.bpm - 105.0) > 4.0)
+    }
+
+    @Test
+    fun kickOctaveSnapsToTheIntegerNotTheMixPeak() {
+        val sr = 44100
+        val snareHops = 89
+        val kickHops = snareHops * 2
+        val beats = 48
+        val n = beats * kickHops + 400
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        for (i in 0 until beats) {
+            val kick = 40 + i * kickHops
+            val snare = 40 + i * snareHops
+            if (kick in low.indices) low[kick] = 1f
+            if (snare in mid.indices) mid[snare] = 1f
+        }
+        val duration = n * ClickGrid.HOP.toDouble() / sr
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration)
+        assertEquals("octave stayed on the mix peak, was ${grid.bpm}", 155.0, grid.bpm.toDouble(), 0.5)
+    }
+
+    @Test
+    fun flatDrumsFollowTheBassPulse() {
+        val bpm = 75.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beats = 32
+        val duration = 0.20 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        var t = 0.20
+        repeat(beats) {
+            spike(bass, sr, t, 1f)
+            t += period
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass)
+        assertEquals("flat drums kept a guess, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+    }
+
+    @Test
+    fun ghostKickOnTheFastBeatStillKeepsTwoHundred() {
+        val bpm = 200.0
+        val quarter = 60.0 / bpm
+        val sr = 44100
+        val beats = 64
+        val duration = 0.20 + beats * quarter + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val mid = FloatArray(n)
+        repeat(beats) { i ->
+            val t = 0.20 + i * quarter
+            if (i % 2 == 0) {
+                spike(low, sr, t, 1f)
+            } else {
+                spike(low, sr, t, 0.28f)
+                spike(mid, sr, t, 1f)
+            }
+        }
+        val grid = ClickGrid.fromBands(low, mid, null, sr, duration)
+        assertEquals("ghost kick halved 200, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+    }
+
+    @Test
+    fun combBassKeepsTheHintWhenDrumsAreSilent() {
+        val sr = 44100
+        val beats = 48
+        val duration = 0.20 + beats * (60.0 / 90.0) + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        for (bpm in doubleArrayOf(90.0, 128.0, 164.0)) {
+            val period = 60.0 / bpm
+            var t = 0.20
+            while (t < duration - 0.2) {
+                spike(bass, sr, t, 1f)
+                t += period
+            }
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, hintBpm = 100f, bass = bass)
+        assertEquals("comb bass replaced the hint, was ${grid.bpm}", 100.0, grid.bpm.toDouble(), 1.0)
+    }
+
+    @Test
+    fun drumPulseAtNinetyFiveBeatsACombBass() {
+        val sr = 44100
+        val bpm = 95.0
+        val period = 60.0 / bpm
+        val beats = 48
+        val duration = 0.20 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        var t = 0.20
+        repeat(beats) {
+            spike(low, sr, t, 1f)
+            t += period
+        }
+        for (other in doubleArrayOf(90.0, 128.0, 164.0)) {
+            val step = 60.0 / other
+            var u = 0.15
+            while (u < duration - 0.2) {
+                spike(bass, sr, u, 1f)
+                u += step
+            }
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass)
+        assertEquals("comb bass replaced 95, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+    }
+
+    @Test
     fun profilePutsEveryBeatOnBinsZeroAndEight() {
         val profile = profileOfSpikes(period = 0.5, phase = 0.10, offset = 0.0, everyBeats = 1)
         assertEquals(16, profile.size)
@@ -565,6 +712,33 @@ class ClickGridTest {
     }
 
     @Test
+    fun diagAcfListsTheTenStrongestPeaksByHeight() {
+        val hop = 0.004
+        val corr = FloatArray(420)
+        val lags = intArrayOf(80, 110, 140, 170, 200, 230, 260, 290, 320, 350, 380, 40)
+        for (i in lags.indices) {
+            val lag = lags[i]
+            corr[lag] = (100 - i).toFloat()
+            corr[lag - 1] = 1f
+            corr[lag + 1] = 1f
+        }
+        corr[60] = 80f
+        corr[61] = 90f
+        corr[62] = 70f
+        val line = ClickGrid.diagAcf(corr, hop, 2, 410)
+        val parts = line.removePrefix("acf ").split(" | ")
+        assertEquals(10, parts.size)
+        assertEquals(acfPeak(80, hop, 100f), parts[0])
+        assertEquals(acfPeak(110, hop, 99f), parts[1])
+        assertEquals(acfPeak(350, hop, 91f), parts[9])
+        assertTrue(!line.contains(acfPeak(380, hop, 90f)))
+        assertTrue(!line.contains(acfPeak(40, hop, 89f)))
+        assertTrue(!line.contains(acfPeak(61, hop, 90f)))
+        assertEquals("acf none", ClickGrid.diagAcf(FloatArray(20), hop, 2, 18))
+        assertEquals("acf none", ClickGrid.diagAcf(corr, 0.0, 2, 410))
+    }
+
+    @Test
     fun profileOfSilenceAndBadInputIsZeros() {
         val zeros = DoubleArray(16)
         assertTrue(ClickGrid.profile(FloatArray(400), 0.004, 0.5, 0.0).contentEquals(zeros))
@@ -577,6 +751,11 @@ class ClickGridTest {
         val stale = TrackAnalysis.grid(120f).copy(kickGridVersion = ClickGrid.VERSION - 1)
         assertTrue(!ClickGrid.isCurrent(stale))
         assertTrue(!ClickGrid.isCurrent(null))
+    }
+
+    private fun acfPeak(lag: Int, hop: Double, c: Float): String {
+        val bpm = 60.0 / (lag * hop)
+        return "bpm=${String.format(Locale.US, "%.4f", bpm)} c=${String.format(Locale.US, "%.4f", c.toDouble())}"
     }
 
     /** Атака в одном хопе, горб низа на [bodyAt]. */

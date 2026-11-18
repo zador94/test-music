@@ -31,6 +31,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -68,6 +69,7 @@ fun LibraryScreen(
     val tracks by vm.tracks.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
     val kickGridBusy by vm.kickGridBusy.collectAsStateWithLifecycle()
+    val tempoRecalc by vm.tempoRecalc.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
     val picker = rememberLauncherForActivityResult(
@@ -134,26 +136,84 @@ fun LibraryScreen(
         if (tracks.isEmpty()) {
             EmptyLibrary(Modifier.padding(padding))
         } else {
-            LazyColumn(
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(tracks, key = { it.id }) { track ->
-                    TrackCard(
-                        track = track,
-                        analyzingClick = track.id in kickGridBusy,
-                        onClick = {
-                            if (PlaybackPolicy.opensPlayer(track)) onOpenPlayer(track.id)
-                            else onOpenProcessing(track.id)
-                        },
-                        onDelete = { vm.delete(track.id) },
-                    )
+                RecalculateAllTempo(
+                    progress = tempoRecalc,
+                    enabled = TempoRecalc.ids(tracks).isNotEmpty(),
+                    onClick = vm::recalculateAllTempos,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(tracks, key = { it.id }) { track ->
+                        TrackCard(
+                            track = track,
+                            analyzingClick = track.id in kickGridBusy,
+                            onClick = {
+                                if (PlaybackPolicy.opensPlayer(track)) onOpenPlayer(track.id)
+                                else onOpenProcessing(track.id)
+                            },
+                            onDelete = { vm.delete(track.id) },
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RecalculateAllTempo(
+    progress: TempoRecalcProgress?,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val running = progress != null
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(Daw.pillShape)
+                .background(Daw.surfaceHigh)
+                .border(1.dp, if (enabled && !running) Daw.accent else Daw.line, Daw.pillShape)
+                .clickable(enabled = enabled && !running, onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (progress == null) {
+                    "Пересчитать темп"
+                } else {
+                    "Пересчёт ${progress.done} из ${progress.total}"
+                },
+                color = if (enabled && !running) Daw.accent else Daw.muted,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        if (running) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                color = Daw.accent,
+                trackColor = Daw.line,
+            )
+        }
+        Text(
+            text = when {
+                running -> "По одной песне, только по ударным. Нарезка заново не идёт."
+                enabled -> "Для всех песен, у которых уже есть ударные."
+                else -> "Появится, когда у песни будут ударные."
+            },
+            color = Daw.muted,
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
