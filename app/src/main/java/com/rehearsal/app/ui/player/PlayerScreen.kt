@@ -128,6 +128,7 @@ fun PlayerScreen(
                 ui = ui,
                 onEnabled = vm::setMetronomeOn,
                 onBpm = vm::setMetronomeBpm,
+                onResetTempo = vm::resetTempo,
                 onClickShift = vm::setClickShiftMs,
                 onRecalculateKickGrid = vm::recalculateKickGrid,
             )
@@ -295,6 +296,7 @@ private fun MetronomeBlock(
     ui: PlayerUi,
     onEnabled: (Boolean) -> Unit,
     onBpm: (Float) -> Unit,
+    onResetTempo: () -> Unit,
     onClickShift: (Int) -> Unit,
     onRecalculateKickGrid: () -> Unit,
 ) {
@@ -348,6 +350,11 @@ private fun MetronomeBlock(
             ),
             color = Daw.muted,
             style = MaterialTheme.typography.bodySmall,
+        )
+        DawTextButton(
+            label = "Исходный темп",
+            onClick = onResetTempo,
+            enabled = !PlaybackMath.isOriginalTempo(ui.metronomeBpm, original),
         )
         Text("Сдвиг клика, мс: ${ui.clickShiftMs}", color = Daw.text)
         Slider(

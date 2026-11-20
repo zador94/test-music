@@ -41,6 +41,15 @@ object PlaybackMath {
     }
 
     /**
+     * Слайдер уже стоит на исходном темпе песни: подписи BPM совпадают до сотой,
+     * скорость при этом ×1. Сравнение по подписи, а не по сырому float слайдера.
+     */
+    fun isOriginalTempo(metronomeBpm: Float, originalBpm: Float): Boolean {
+        if (!metronomeBpm.isFinite() || !originalBpm.isFinite()) return false
+        return formatOriginalBpm(metronomeBpm) == formatOriginalBpm(originalBpm)
+    }
+
+    /**
      * Принимает только полный BPM в [MIN_BPM, MAX_BPM]. Пусто, «1», «10», «12», «.» — null,
      * плеер и слайдер не трогаем. Первый символ в поле темпа не должен ничего применять.
      */

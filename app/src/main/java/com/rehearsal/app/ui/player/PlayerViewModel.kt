@@ -172,6 +172,10 @@ class PlayerViewModel(
         }
     }
 
+    fun resetTempo() {
+        setMetronomeBpm(playback.originalBpm)
+    }
+
     fun setMetronomeOn(on: Boolean) {
         playback.setMetronomeEnabled(on)
         _ui.update { it.copy(metronomeOn = on) }

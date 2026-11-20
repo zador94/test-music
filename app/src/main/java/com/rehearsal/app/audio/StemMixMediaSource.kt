@@ -179,7 +179,9 @@ class StemMixMediaSource(
 
     companion object {
         private const val CHANNELS = 2
-        private const val CHUNK_FRAMES = 1024
+        // ~186 мс при 44.1 кГц. Окно WSOLA должно видеть период баса;
+        // 1024 кадра (~23 мс) оставляли зерно короче периода — гребенка и щелчки на стыке.
+        private const val CHUNK_FRAMES = 8192
         private const val CHUNK_BYTES = CHUNK_FRAMES * 4
         private val MEDIA_ITEM = MediaItem.Builder()
             .setMediaId("StemMixMediaSource")

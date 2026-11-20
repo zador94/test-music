@@ -6,6 +6,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * Свой WSOLA на **всех** скоростях; AudioTrack всегда 1×.
@@ -17,6 +19,18 @@ import kotlin.math.cos
 object SpeedStretch {
     const val APPLY_ABOVE = 1.001f
     const val APPLY_BELOW = 0.999f
+
+    /** ±кадры вокруг линейной позиции. 320 ≈ полпериода 70 Гц при 44.1 кГц, клик не фламит. */
+    private const val PHASE_DELTA = 320
+
+    /** Насколько далеко от линейной позиции можно уйти ради чуть лучшей корреляции. */
+    private const val CENTER_BIAS = 0.2
+
+    /** Хвост, по которому ищем фазу. Длиннее — лучше бас, дороже CPU. */
+    private const val CORR_SAMPLES = 512
+
+    /** Стык чанка притянуть к исходным семплам, чтобы не щёлкало. ~1.5 мс при 44.1 кГц. */
+    private const val EDGE_FRAMES = 64
 
     fun isUnity(speed: Float): Boolean {
         if (!speed.isFinite()) return true
@@ -168,8 +182,11 @@ object SpeedStretch {
     }
 
     /**
-     * Waveform-similarity overlap-add: каждое зерно копируется 1:1 (период тот же),
-     * следующее ищем по корреляции, а средний шаг по входу = hopOut × speed.
+     * WSOLA: зерно копируется 1:1 (тон не едет), следующее ищется вокруг линейной
+     * позиции `outFrames/inFrames` — той же, по которой клик садится после stretch.
+     * Сдвиг зерна не больше [PHASE_DELTA]: сетка клика не уезжает, а нахлёст
+     * не складывает волну саму с собой в противофазе (гребенка, «вата»).
+     * Вес окна делится обратно: край буфера не уходит в ноль и не щёлкает.
      */
     private fun wsola(
         input: FloatArray,
@@ -178,28 +195,150 @@ object SpeedStretch {
         channels: Int,
     ): FloatArray {
         val acc = FloatArray(outFrames * channels)
+        val weight = FloatArray(outFrames)
         val win = grainWindow(inFrames)
+        // 50% overlap: два окна Ханна в сумме дают 1, фаза ищется по половине зерна.
         val hopOut = (win / 2).coerceAtLeast(1)
-        // Тот же коэффициент, что клик: outFrames/inFrames. Не hopOut×speed
-        // и не bestMatch по содержимому — иначе стемы плывут относительно клика.
-        val hopIn = ((hopOut.toLong() * inFrames) / outFrames.coerceAtLeast(1))
-            .toInt()
-            .coerceAtLeast(1)
         val window = hann(win)
-        var desiredIn = 0
+        val ch = channels.coerceAtLeast(1)
+        // Дробный шаг: целый hopIn округлял коэффициент и расходился с кликом.
+        val hopIn = hopOut.toDouble() * inFrames.toDouble() / outFrames.coerceAtLeast(1).toDouble()
+        var natural = 0.0
+        var prevStart = 0
         var outPos = 0
-        while (outPos < outFrames) {
-            val grainStart = if (outPos == 0) 0 else desiredIn.coerceIn(0, (inFrames - 1).coerceAtLeast(0))
-            addGrain(input, acc, grainStart, outPos, win, inFrames, outFrames, channels, window)
+        var grains = 0
+        while (outPos < outFrames && grains <= outFrames) {
+            val need = minOf(hopOut, outFrames - outPos).coerceAtLeast(1)
+            val maxStart = (inFrames - need).coerceAtLeast(0)
+            val desired = natural.roundToInt().coerceIn(0, maxStart)
+            val start = if (grains == 0) {
+                0
+            } else {
+                bestStart(input, inFrames, ch, prevStart, desired, hopOut, win, maxStart)
+            }
+            addGrain(input, acc, weight, start, outPos, win, inFrames, outFrames, ch, window)
+            prevStart = start
             outPos += hopOut
-            desiredIn += hopIn
+            natural += hopIn
+            grains++
         }
+        normalizeAndLockEdges(acc, weight, input, inFrames, outFrames, ch)
         return acc
+    }
+
+    /**
+     * Максимум корреляции хвоста предыдущего зерна с началом кандидата.
+     * Центр поиска — линейная позиция, не «куда уехало прошлое зерно».
+     */
+    private fun bestStart(
+        input: FloatArray,
+        inFrames: Int,
+        channels: Int,
+        prevStart: Int,
+        desired: Int,
+        hopOut: Int,
+        win: Int,
+        maxStart: Int,
+    ): Int {
+        val center = desired.coerceIn(0, maxStart)
+        val delta = minOf(PHASE_DELTA, win / 2).coerceAtLeast(1)
+        val from = (center - delta).coerceAtLeast(0)
+        val to = (center + delta).coerceAtMost(maxStart)
+        if (from >= to) return center
+        val compare = minOf(CORR_SAMPLES, win - hopOut, inFrames).coerceAtLeast(1)
+        var best = center
+        var bestScore = alignmentScore(
+            input, inFrames, channels, prevStart, center, hopOut, compare, center, delta,
+        )
+        // Шаг 4, потом доводка: полный перебор ±320 на каждом зерне не нужен телефону.
+        val step = if (to - from > 48) 4 else 1
+        var candidate = from
+        while (candidate <= to) {
+            val score = alignmentScore(
+                input, inFrames, channels, prevStart, candidate, hopOut, compare, center, delta,
+            )
+            if (score > bestScore) {
+                bestScore = score
+                best = candidate
+            }
+            candidate += step
+        }
+        if (step > 1) {
+            val refineFrom = (best - step).coerceAtLeast(from)
+            val refineTo = (best + step).coerceAtMost(to)
+            for (refine in refineFrom..refineTo) {
+                val score = alignmentScore(
+                    input, inFrames, channels, prevStart, refine, hopOut, compare, center, delta,
+                )
+                if (score > bestScore) {
+                    bestScore = score
+                    best = refine
+                }
+            }
+        }
+        return best
+    }
+
+    /**
+     * Нормированная корреляция минус штраф за уход от линейной позиции.
+     * Без штрафа идеальная копия хвоста (нулевой сдвиг по времени) всегда
+     * побеждает и зерно застревает: темп не замедляется, а конец буфера зацикливается.
+     */
+    private fun alignmentScore(
+        input: FloatArray,
+        inFrames: Int,
+        channels: Int,
+        prevStart: Int,
+        candidate: Int,
+        hopOut: Int,
+        compare: Int,
+        center: Int,
+        delta: Int,
+    ): Double {
+        val raw = correlate(input, inFrames, channels, prevStart, candidate, hopOut, compare)
+        if (raw == Double.NEGATIVE_INFINITY) return raw
+        val distance = (candidate - center).toDouble()
+        val span = delta.toDouble().coerceAtLeast(1.0)
+        val penalty = (distance * distance) / (span * span) * CENTER_BIAS
+        return raw - penalty
+    }
+
+    private fun correlate(
+        input: FloatArray,
+        inFrames: Int,
+        channels: Int,
+        prevStart: Int,
+        candidate: Int,
+        hopOut: Int,
+        compare: Int,
+    ): Double {
+        var dot = 0.0
+        var energyA = 0.0
+        var energyB = 0.0
+        var n = 0
+        for (i in 0 until compare) {
+            val aFrame = prevStart + hopOut + i
+            val bFrame = candidate + i
+            if (aFrame >= inFrames || bFrame >= inFrames) break
+            val aBase = aFrame * channels
+            val bBase = bFrame * channels
+            for (ch in 0 until channels) {
+                val a = input[aBase + ch].toDouble()
+                val b = input[bBase + ch].toDouble()
+                dot += a * b
+                energyA += a * a
+                energyB += b * b
+            }
+            n++
+        }
+        if (n < 8 || energyA < 1e-6 || energyB < 1e-6) return Double.NEGATIVE_INFINITY
+        return dot / sqrt(energyA * energyB)
     }
 
     private fun addGrain(
         input: FloatArray,
         acc: FloatArray,
+        weight: FloatArray,
         inStart: Int,
         outStart: Int,
         win: Int,
@@ -212,6 +351,7 @@ object SpeedStretch {
         if (n <= 0) return
         for (i in 0 until n) {
             val w = hann[i]
+            weight[outStart + i] += w
             val inBase = (inStart + i) * channels
             val outBase = (outStart + i) * channels
             for (ch in 0 until channels) {
@@ -220,15 +360,109 @@ object SpeedStretch {
         }
     }
 
+    /**
+     * Делим на сумму окон, иначе край Ханна (он равен 0) вырезает кусок тишины
+     * на каждом буфере. Первые и последние [EDGE_FRAMES] притягиваем к линейной
+     * карте входа: стык чанков — соседние семплы исходника, не скачок в ноль.
+     */
+    private fun normalizeAndLockEdges(
+        acc: FloatArray,
+        weight: FloatArray,
+        input: FloatArray,
+        inFrames: Int,
+        outFrames: Int,
+        channels: Int,
+    ) {
+        for (frame in 0 until outFrames) {
+            val w = weight[frame]
+            val base = frame * channels
+            if (w < 1e-4f) {
+                val pos = frame.toDouble() * inFrames.toDouble() / outFrames.toDouble()
+                for (ch in 0 until channels) {
+                    acc[base + ch] = sampleAt(input, inFrames, channels, ch, pos)
+                }
+            } else {
+                val inv = 1f / w
+                for (ch in 0 until channels) {
+                    acc[base + ch] *= inv
+                }
+            }
+        }
+        val edge = minOf(EDGE_FRAMES, outFrames / 8).coerceAtLeast(0)
+        if (edge <= 1) return
+        lockEdges(acc, input, inFrames, outFrames, channels, lockStart = true, lockEnd = true)
+    }
+
+    private fun lockEdges(
+        acc: FloatArray,
+        input: FloatArray,
+        inFrames: Int,
+        outFrames: Int,
+        channels: Int,
+        lockStart: Boolean,
+        lockEnd: Boolean,
+    ) {
+        val edge = minOf(EDGE_FRAMES, outFrames / 8).coerceAtLeast(0)
+        if (edge <= 1) return
+        for (i in 0 until edge) {
+            val towardStretch = i / (edge - 1).toFloat()
+            if (lockStart) {
+                blendTowardLinear(acc, input, inFrames, outFrames, channels, i, towardStretch)
+            }
+            if (lockEnd) {
+                blendTowardLinear(
+                    acc, input, inFrames, outFrames, channels, outFrames - 1 - i, towardStretch,
+                )
+            }
+        }
+    }
+
+    private fun blendTowardLinear(
+        acc: FloatArray,
+        input: FloatArray,
+        inFrames: Int,
+        outFrames: Int,
+        channels: Int,
+        frame: Int,
+        towardStretch: Float,
+    ) {
+        val pos = frame.toDouble() * inFrames.toDouble() / outFrames.toDouble()
+        val base = frame * channels
+        val keep = towardStretch.coerceIn(0f, 1f)
+        for (ch in 0 until channels) {
+            val linear = sampleAt(input, inFrames, channels, ch, pos)
+            acc[base + ch] = linear + (acc[base + ch] - linear) * keep
+        }
+    }
+
+    private fun sampleAt(
+        input: FloatArray,
+        inFrames: Int,
+        channels: Int,
+        channel: Int,
+        pos: Double,
+    ): Float {
+        if (inFrames <= 1) return input[channel]
+        val x = pos.coerceIn(0.0, (inFrames - 1).toDouble())
+        val i = x.toInt().coerceIn(0, inFrames - 1)
+        val frac = (x - i).toFloat()
+        val a = input[i * channels + channel]
+        if (frac <= 0f || i >= inFrames - 1) return a
+        val b = input[(i + 1) * channels + channel]
+        return a + (b - a) * frac
+    }
+
     private fun grainWindow(inFrames: Int): Int {
         val raw = when {
             inFrames >= 8192 -> 2048
             inFrames >= 2048 -> 1024
-            inFrames >= 512 -> 256
-            inFrames >= 128 -> 64
-            else -> (inFrames / 2).coerceAtLeast(8)
+            inFrames >= 1024 -> 512
+            inFrames >= 256 -> 256
+            else -> (inFrames / 2).coerceAtLeast(16)
         }
-        return (raw / 2) * 2
+        val even = raw - raw % 2
+        val half = (inFrames / 2) * 2
+        return even.coerceAtMost(half.coerceAtLeast(2)).coerceAtLeast(2)
     }
 
     private fun hann(n: Int): FloatArray {

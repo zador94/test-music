@@ -1,6 +1,8 @@
 package com.rehearsal.app.player
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaybackMathTest {
@@ -27,6 +29,17 @@ class PlaybackMathTest {
         assertEquals(102.84f, PlaybackMath.committedOriginalBpm(102.84f), 0.001f)
         assertEquals(1f, PlaybackMath.playbackSpeed(104.63f, PlaybackMath.committedOriginalBpm(104.63f)), 1e-3f)
         assertEquals(104.6f, PlaybackMath.clampMetronomeBpm(104.6f, 104.6f), 0.01f)
+    }
+
+    @Test
+    fun resetTempoTargetIsCommittedOriginalAtUnitySpeed() {
+        val original = PlaybackMath.committedOriginalBpm(104.964f)
+        assertEquals(104.96f, original, 0.001f)
+        assertTrue(PlaybackMath.isOriginalTempo(104.96f, 104.964f))
+        assertTrue(PlaybackMath.isOriginalTempo(104.964f, 104.96f))
+        assertFalse(PlaybackMath.isOriginalTempo(90f, 104.96f))
+        assertFalse(PlaybackMath.isOriginalTempo(Float.NaN, 104.96f))
+        assertEquals(1f, PlaybackMath.playbackSpeed(original, original), 1e-4f)
     }
 
     @Test
