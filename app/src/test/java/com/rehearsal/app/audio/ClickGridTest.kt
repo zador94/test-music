@@ -861,6 +861,97 @@ class ClickGridTest {
     }
 
     @Test
+    fun fourPercentOffTheStrumIsNotABlurredAttack() {
+        // 80.26 × 4 ещё рядом с 328. 78.74 × 4 = 315 — уже нет. Окно это не лечит: решает бочка.
+        assertTrue(ClickGrid.diagAttackRepeat(listOf(328.3095 to 0.0036f, 261.6223 to 0.0027f), 80.2573) != null)
+        assertTrue(ClickGrid.diagAttackRepeat(listOf(328.2538 to 0.0057f, 261.5563 to 0.0041f), 78.7433) == null)
+    }
+
+    @Test
+    fun loggedSeventyFiveIsABeatAndEightyIsFlat() {
+        val at75 = doubleArrayOf(1.00, 0.36, 0.33, 0.62, 0.63, 0.44, 0.76, 0.69, 0.40, 0.35, 0.37, 0.37, 0.30, 0.28, 0.34, 0.88)
+        val at80 = doubleArrayOf(1.00, 0.85, 0.81, 0.82, 0.83, 0.92, 0.89, 0.93, 0.89, 0.91, 0.86, 0.84, 0.90, 0.86, 0.89, 0.88)
+        val beat = ClickGrid.pulseContrast(at75)
+        val flat = ClickGrid.pulseContrast(at80)
+        assertTrue("75 contrast $beat", beat >= 0.30)
+        assertTrue("80 contrast $flat", flat < 0.20)
+        assertTrue(beat >= flat + 0.15)
+    }
+
+    @Test
+    fun kickAtSeventyFiveBeatsTheFlatEnvelopeAndAnEmptyKickDoesNot() {
+        val hop = ClickGrid.HOP.toDouble() / 44100
+        val n = (30.0 / hop).toInt()
+        val kick = pulseTrain(n, hop, 75.0)
+        assertTrue(ClickGrid.kickBeatsEnvelope(60.0 / 78.74, 60.0 / 75.0, kick, hop))
+        assertTrue(!ClickGrid.kickBeatsEnvelope(60.0 / 78.74, 60.0 / 75.0, FloatArray(n), hop))
+        val onTheEnvelope = pulseTrain(n, hop, 78.74)
+        assertTrue(!ClickGrid.kickBeatsEnvelope(60.0 / 78.74, 60.0 / 75.0, onTheEnvelope, hop))
+    }
+
+    @Test
+    fun lowBeatAtSeventyFiveBeatsTheEnvelopeAndItsFastOctave() {
+        // Счёт берёт 152, свёртка и низ — 75. Огибающая 78.74 на этом низе плоская.
+        val hop = ClickGrid.HOP.toDouble() / 44100
+        val n = (30.0 / hop).toInt()
+        val low = pulseTrain(n, hop, 75.0)
+        val picked = ClickGrid.beatPeriodOverEnvelope(
+            60.0 / 78.74,
+            listOf(60.0 / 75.1022, 60.0 / 152.6383, 60.0 / 93.1795),
+            low,
+            hop,
+        )
+        assertTrue("low beat was $picked", picked != null)
+        assertEquals(75.0, 60.0 / picked!!, 1.0)
+        assertTrue(ClickGrid.beatPeriodOverEnvelope(60.0 / 78.74, listOf(60.0 / 75.0), null, hop) == null)
+        val onEnvelope = pulseTrain(n, hop, 78.74)
+        assertTrue(
+            ClickGrid.beatPeriodOverEnvelope(
+                60.0 / 78.74,
+                listOf(60.0 / 75.0, 60.0 / 152.0),
+                onEnvelope,
+                hop,
+            ) == null,
+        )
+    }
+
+    @Test
+    fun silentDrumsKeepTheBassSwellBesideAStrumComb() {
+        val bpm = 80.0
+        val period = 60.0 / bpm
+        val sr = 44100
+        val beats = 32
+        val duration = 0.20 + beats * period + 0.5
+        val n = (duration * sr / ClickGrid.HOP).toInt().coerceAtLeast(8)
+        val low = FloatArray(n)
+        val bass = FloatArray(n)
+        val other = FloatArray(n)
+        val hopSec = ClickGrid.HOP.toDouble() / sr
+        for (i in bass.indices) {
+            val phase = (i * hopSec - 0.20) / period
+            if (phase >= 0.0 && phase < beats) {
+                val swell = (0.5 - 0.5 * cos(2.0 * PI * phase)).toFloat()
+                bass[i] = swell
+                other[i] = swell
+            }
+        }
+        for (strum in doubleArrayOf(320.0, 260.0)) {
+            var t = 0.27
+            val step = 60.0 / strum
+            while (t < duration - 0.2) {
+                spike(bass, sr, t, 1f)
+                spike(other, sr, t, 1f)
+                t += step
+            }
+        }
+        val grid = ClickGrid.fromBands(low, null, null, sr, duration, bass = bass, other = other)
+        assertEquals("bass swell was dropped, was ${grid.bpm}", bpm, grid.bpm.toDouble(), 2.0)
+        val crest = 0.20 + period / 2.0
+        val err = wrapped(grid.phaseSec - crest, grid.periodSec)
+        assertTrue("phase left the swell, err=${err * 1000}ms phase=${grid.phaseSec}", abs(err) < 0.08)
+    }
+
+    @Test
     fun diagFoldsKeepsTheTenHighestDistinctPeriods() {
         val ranked = ArrayList<Pair<Double, Float>>()
         val scores = floatArrayOf(0.5f, 0.25f, 0.125f, 0.0625f, 0.03125f, 0.015625f, 0.0078125f, 0.00390625f, 0.001953125f, 0.0009765625f, 0.00048828125f)
@@ -903,6 +994,18 @@ class ClickGridTest {
         val stale = TrackAnalysis.grid(120f).copy(kickGridVersion = ClickGrid.VERSION - 1)
         assertTrue(!ClickGrid.isCurrent(stale))
         assertTrue(!ClickGrid.isCurrent(null))
+    }
+
+    private fun pulseTrain(n: Int, hop: Double, bpm: Double): FloatArray {
+        val out = FloatArray(n)
+        val period = 60.0 / bpm
+        var t = 0.2
+        while (t < n * hop - 0.05) {
+            val i = (t / hop).toInt()
+            if (i in out.indices) out[i] = 1f
+            t += period
+        }
+        return out
     }
 
     private fun peak(corr: FloatArray, lag: Int, c: Float) {

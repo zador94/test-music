@@ -36,7 +36,7 @@ import kotlin.math.sqrt
  * Если и атаки пустые, период берётся из сглаженной громкости баса и other: аккорд баллады держится, а не бьёт.
  */
 object ClickGrid {
-    const val VERSION = 50
+    const val VERSION = 53
     const val SAMPLE_RATE = 44100
     /** ~4.4 мс при 44.1 кГц: общий шаг функции атаки. */
     const val HOP = 192
@@ -66,6 +66,12 @@ object ClickGrid {
     private const val DOMINANT_RIVAL_RATIO = 0.72f
     /** Огибающая аккорда: окно около 0.1 с, уже чем медиана атаки 0.2 с. */
     private const val ENVELOPE_SIGMA = 0.04
+    /**
+     * Бочка собрана в долю. 75 в логе даёт около 0.5, ровные 80 — около 0.12.
+     * Октава того же удара прибавляет около 0.06, поэтому порог выше этого зазора.
+     */
+    private const val KICK_BEAT_CONTRAST = 0.30
+    private const val KICK_CONTRAST_MARGIN = 0.15
     private const val PHASE_STEP_SEC = 0.002
     private const val SIGMA_SEC = 0.015
     private const val DOWNBEAT_BONUS = 1.30
@@ -214,6 +220,7 @@ object ClickGrid {
             drums, kick, midFlux, highFlux, midShare, bassOnset, otherOnset, hopSec, duration,
             rawBass = bass ?: lead,
             rawOther = other,
+            lowEnergy = low,
         )
         val period = fit?.periodSec?.let(::snapToIntegerBpm) ?: (60.0 / (hint?.toDouble() ?: MetronomeClickEngine.DEFAULT_BPM.toDouble()))
         val phase = positiveMod(fit?.phaseSec ?: 0.0, period)
@@ -339,6 +346,7 @@ object ClickGrid {
         allowFallback: Boolean = true,
         rawBass: FloatArray? = null,
         rawOther: FloatArray? = null,
+        lowEnergy: FloatArray? = null,
     ): Fit? {
         if (activation.size < 32 || hopSec <= 0.0) return null
         if (peakOf(activation) < 1e-6f) {
@@ -349,13 +357,15 @@ object ClickGrid {
                 return searchGrid(body, body, null, null, 0.0, null, null, hopSec, duration, allowFallback = false)
             }
             if (body != null) Log.d(DIAG, "bass/other has no dominant period ${formatContest(bodyRead)}")
-            return envelopeFit(rawBass, rawOther, body, activation.size, hopSec, duration).fit
+            // Ударных нет. Штрихи без аккорда не становятся темпом, а держащийся бас остаётся.
+            return envelopeFit(rawBass, rawOther, body, activation.size, hopSec, duration, keepHeldChord = true).fit
         }
         val wide = lagRange(hopSec, activation.size, SEARCH_MIN_BPM / 2.0, SEARCH_MAX_BPM * 2.0)
         if (wide == null) return null
         val corr = autocorr(activation, wide.first, wide.second)
         // 47.5 у Земфиры сильнее всего, что лежит в 65–210. Пол без этой октавы уводит поиск в бас.
         val musical = maxCorrBetween(corr, hopSec, SEARCH_MIN_BPM / 2.0, FAST_SEARCH_MAX)
+        var heldEnvelope: Fit? = null
         if (allowFallback && musical < DRUM_CORR_FLOOR) {
             val body = bodyActivation(bass, other, activation.size)
             val bodyRead = if (body == null) null else dominantReadOf(body, hopSec)
@@ -372,8 +382,12 @@ object ClickGrid {
                     Log.d(DIAG, "drums corr=$corrText bass/other has no dominant period ${formatContest(bodyRead)}")
                 }
                 val envelope = envelopeFit(rawBass, rawOther, body, activation.size, hopSec, duration)
-                if (envelope.fit != null) return envelope.fit
-                Log.d(DIAG, "sub-floor drums c=$corrText envelope=${envelope.miss}, continuing")
+                if (envelope.fit != null) {
+                    heldEnvelope = envelope.fit
+                    Log.d(DIAG, "sub-floor drums c=$corrText envelope=held, checking kick")
+                } else {
+                    Log.d(DIAG, "sub-floor drums c=$corrText envelope=${envelope.miss}, continuing")
+                }
             }
         }
         Log.d(DIAG, diagAcf(corr, hopSec, wide.first, wide.second))
@@ -388,7 +402,7 @@ object ClickGrid {
             ),
             kick,
         )
-        if (periods.isEmpty()) return null
+        if (periods.isEmpty()) return heldEnvelope
         val smooth = gaussianSmooth(activation, hopSec, SIGMA_SEC)
         val smoothKick = if (peakOf(kickOnset) >= 1e-6f) gaussianSmooth(kickOnset, hopSec, SIGMA_SEC) else smooth
         val smoothBass = bass?.let { gaussianSmooth(it, hopSec, SIGMA_SEC) }
@@ -408,7 +422,16 @@ object ClickGrid {
                     "phase=${diagNum(it.phaseSec)} score=${diagNum(it.score)}"
             },
         )
-        val chosen = choose(fits, kick, kickOnset, midFlux, midShare, hopSec, duration)
+        // Счёт любит 152: точек вдвое больше. Ниже пола доля видна в громкости низа, не в этом счёте.
+        // 75 в свёртке первое, а 153 на onset даёт c=0.23 — почти так же плоско, как огибающая 78.7.
+        val beatPeriod = heldEnvelope?.let {
+            beatPeriodOverEnvelope(it.periodSec, fits.map { fit -> fit.periodSec }, lowEnergy, hopSec)
+        }
+        val chosen = if (beatPeriod != null) {
+            fits.minBy { abs(it.periodSec - beatPeriod) }
+        } else {
+            choose(fits, kick, kickOnset, midFlux, midShare, hopSec, duration)
+        }
         val locked = kick != null && isWholeBpm(chosen.periodSec) &&
             near(chosen.periodSec, (60.0 / kick) / 2.0, 0.03)
         val refined = refineGrid(
@@ -419,10 +442,23 @@ object ClickGrid {
             duration,
             lockPeriod = locked,
         )
-        return chosen.copy(
+        val drum = chosen.copy(
             periodSec = refined.periodSec,
             phaseSec = backbeatPhase(midFlux, highFlux, kickOnset, refined.phaseSec, refined.periodSec, hopSec, duration),
         )
+        if (beatPeriod != null) return drum
+        val held = heldEnvelope ?: return drum
+        if (near(held.periodSec, drum.periodSec, 0.03) ||
+            kickBeatsEnvelope(held.periodSec, drum.periodSec, kickOnset, hopSec)
+        ) {
+            return drum
+        }
+        Log.d(
+            DIAG,
+            "envelope kept over kick envBpm=${diagNum(60.0 / held.periodSec)} " +
+                "drumBpm=${diagNum(60.0 / drum.periodSec)}",
+        )
+        return held
     }
 
     private class Grid(val periodSec: Double, val phaseSec: Double)
@@ -787,6 +823,7 @@ object ClickGrid {
         n: Int,
         hopSec: Double,
         duration: Double,
+        keepHeldChord: Boolean = false,
     ): EnvelopeHit {
         val raw = bodyActivation(fitLength(bass, n), fitLength(other, n), n) ?: return EnvelopeHit(null, "none")
         val env = normalize(gaussianSmooth(raw, hopSec, ENVELOPE_SIGMA))
@@ -813,12 +850,24 @@ object ClickGrid {
                     "rivalBpm=${diagNum(repeat.bpm)} c=${diagNum(repeat.corr.toDouble())} " +
                     "bestC=${diagNum(repeat.bestC.toDouble())} ratio=${diagNum(ratio.toDouble())}",
             )
-            return EnvelopeHit(null, "rejected")
+            if (!(keepHeldChord && chordHolds(raw))) return EnvelopeHit(null, "rejected")
         }
         val period = 60.0 / folded
         val phase = bestPhase(env, null, null, 0f, 0f, period, hopSec, duration).phase
         Log.d(DIAG, "envelope bpm=${diagNum(folded)} period=${diagNum(period)} phase=${diagNum(phase)}")
         return EnvelopeHit(Fit(period, phase, 0.0, null), "ok")
+    }
+
+    /**
+     * Аккорд держит звук между атаками: медиана громкости не у пола.
+     * Гребёнка шипов имеет медиану около нуля, даже если сглаживание нарисовало период.
+     */
+    private fun chordHolds(raw: FloatArray): Boolean {
+        val peak = peakOf(raw)
+        if (raw.isEmpty() || peak < 1e-6f) return false
+        val sorted = raw.copyOf()
+        Arrays.sort(sorted)
+        return sorted[sorted.size / 2] >= peak * 0.20f
     }
 
     /** 84 у гребёнки шипов — это половина атак на 168. Такой пик огибающая не приносит. */
@@ -840,7 +889,7 @@ object ClickGrid {
 
     private class AttackRepeat(val bpm: Double, val corr: Float, val bestC: Float)
 
-    /** Только удвоение: огибающая повторила смазанные атаки. Совпадение периода — это сам аккорд. */
+    /** Только удвоение и учетверение: огибающая повторила смазанные атаки. Совпадение периода — это сам аккорд. */
     private fun repeatingAttack(peaks: List<Pair<Double, Float>>, envelopeBpm: Double): AttackRepeat? {
         if (envelopeBpm <= 0.0) return null
         var bestC = 0f
@@ -859,6 +908,77 @@ object ClickGrid {
         }
         if (rivalC <= 0f) return null
         return AttackRepeat(rivalBpm, rivalC, bestC)
+    }
+
+    /**
+     * Кандидат, на котором низ складывается в долю, против плоской огибающей.
+     * Быстрая октава того же удара отбрасывается: ниже пола это восьмые, не темп.
+     * Пустой или ровный низ — огибающую нечем заменить.
+     */
+    internal fun beatPeriodOverEnvelope(
+        envelopePeriod: Double,
+        periods: List<Double>,
+        low: FloatArray?,
+        hopSec: Double,
+    ): Double? {
+        if (low == null || hopSec <= 0.0 || envelopePeriod <= 1e-6 || peakOf(low) < 1e-6f) return null
+        val envC = pulseContrast(profileAligned(low, hopSec, 60.0 / envelopePeriod))
+        val ranked = ArrayList<Pair<Double, Double>>()
+        for (period in periods) {
+            if (period <= 1e-6 || near(period, envelopePeriod, 0.03)) continue
+            ranked.add(period to pulseContrast(profileAligned(low, hopSec, 60.0 / period)))
+        }
+        val qualified = ranked.filter { (_, c) ->
+            c >= KICK_BEAT_CONTRAST && c >= envC + KICK_CONTRAST_MARGIN
+        }
+        Log.d(
+            DIAG,
+            "beat envBpm=${diagNum(60.0 / envelopePeriod)} c=${diagNum(envC)} " +
+                ranked.joinToString(" | ") { (period, c) ->
+                    "bpm=${diagNum(60.0 / period)} c=${diagNum(c)}"
+                },
+        )
+        if (qualified.isEmpty()) return null
+        val quarters = qualified.filter { (period, _) ->
+            qualified.none { (other, _) -> near(period, other / 2.0, 0.03) }
+        }
+        return quarters.maxBy { it.second }.first
+    }
+
+    /**
+     * Огибающую оставляем, пока бочка на темпе ударных не собрана заметно лучше.
+     * Пустая бочка — песня на одном басу, огибающая и есть доля.
+     */
+    internal fun kickBeatsEnvelope(
+        envelopePeriod: Double,
+        drumPeriod: Double,
+        kick: FloatArray,
+        hopSec: Double,
+    ): Boolean {
+        if (envelopePeriod <= 1e-6 || drumPeriod <= 1e-6 || hopSec <= 0.0) return false
+        if (near(envelopePeriod, drumPeriod, 0.03)) return false
+        if (peakOf(kick) < 1e-6f) return false
+        val envC = pulseContrast(profileAligned(kick, hopSec, 60.0 / envelopePeriod))
+        val drumC = pulseContrast(profileAligned(kick, hopSec, 60.0 / drumPeriod))
+        Log.d(
+            DIAG,
+            "envelope vs kick envBpm=${diagNum(60.0 / envelopePeriod)} c=${diagNum(envC)} " +
+                "drumBpm=${diagNum(60.0 / drumPeriod)} c=${diagNum(drumC)}",
+        )
+        return drumC >= KICK_BEAT_CONTRAST && drumC >= envC + KICK_CONTRAST_MARGIN
+    }
+
+    /** 1 − среднее/пик. Ровная полоса около 0.1, удары с паузами около 0.5 и выше. */
+    internal fun pulseContrast(bins: DoubleArray): Double {
+        if (bins.isEmpty()) return 0.0
+        var max = 0.0
+        var sum = 0.0
+        for (v in bins) {
+            if (v > max) max = v
+            sum += v
+        }
+        if (max <= 1e-9) return 0.0
+        return 1.0 - (sum / bins.size) / max
     }
 
     /** Пик ниже 65 удваивается, пока не войдёт в окно. 37.5 → 75. Быстрее 165 не делим: это смазанные атаки. */
