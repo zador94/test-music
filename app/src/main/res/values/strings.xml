@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Репетиция</string>
+    <string name="split_channel_name">Разделение дорожек</string>
+    <string name="split_notification_title">HT-Demucs, 4 дорожки</string>
+    <string name="split_notification_text">Нейросеть считает вокал, ударные, бас и музыку. Это не mid/side.</string>
+</resources>
