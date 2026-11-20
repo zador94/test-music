@@ -45,6 +45,9 @@ class PlaybackEngine(context: Context) {
     private var loadedTrackId: String? = null
     private var appliedSpeed: Float = 1f
     private val speedGate = PlaybackSpeedGate()
+    private val loopGate = AbLoopGate()
+    private var loopRestartPending = false
+    private var loopRestartAtElapsedMs = 0L
 
     var originalBpm: Float = MetronomeClickEngine.DEFAULT_BPM
         private set
@@ -65,10 +68,14 @@ class PlaybackEngine(context: Context) {
         clicks.calibrationUs = ClickCalibration.toUs(clickShiftMs)
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED) {
-                    player.pause()
-                    player.seekTo(0)
+                if (playbackState != Player.STATE_ENDED) return
+                val loop = loopGate.current()
+                if (loop != null) {
+                    restartLoop(loop.aMs)
+                    return
                 }
+                player.pause()
+                player.seekTo(0)
             }
         })
     }
@@ -77,6 +84,7 @@ class PlaybackEngine(context: Context) {
         val sameTrack = loadedTrackId == track.id
         val resumeMs = if (sameTrack) player.currentPosition else 0L
         val keepPlaying = player.playWhenReady
+        if (!sameTrack) loopGate.reset()
         loadedTrackId = track.id
         stemsMode = false
 
@@ -128,8 +136,41 @@ class PlaybackEngine(context: Context) {
     }
 
     fun seekTo(positionMs: Long) {
-        player.seekTo(positionMs)
+        val loop = loopGate.current()
+        val target = if (loop == null) positionMs else AbLoop.clampSongMs(positionMs, loop)
+        player.seekTo(target)
     }
+
+    /** Доехали до B — обратно на A, пока буфер ещё звучит. Конец потока тут не ставим. */
+    fun anchorLoop() {
+        val loop = loopGate.current() ?: return
+        if (player.playbackState == Player.STATE_IDLE) return
+        if (!player.playWhenReady && player.playbackState != Player.STATE_ENDED) return
+        if (player.currentPosition < loop.bMs) {
+            loopRestartPending = false
+            return
+        }
+        restartLoop(loop.aMs)
+    }
+
+    private fun restartLoop(aMs: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (loopRestartPending && now - loopRestartAtElapsedMs < 400L) return
+        loopRestartPending = true
+        loopRestartAtElapsedMs = now
+        player.seekTo(aMs)
+        player.play()
+    }
+
+    fun applyLoop(loop: AbLoop.Loop?) {
+        loopGate.apply(loop)
+    }
+
+    fun currentLoop(): AbLoop.Loop? = loopGate.current()
+
+    fun loopOriginUs(): Long = clicks.gridOriginUs
+
+    fun loopIntervalUs(): Long = clicks.clickIntervalUs()
 
     fun setOriginalBpm(bpm: Float) {
         originalBpm = PlaybackMath.committedOriginalBpm(bpm)

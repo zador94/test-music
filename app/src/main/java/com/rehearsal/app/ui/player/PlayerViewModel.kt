@@ -10,6 +10,7 @@ import com.rehearsal.app.audio.ClickGrid
 import com.rehearsal.app.audio.MetronomeClickEngine
 import com.rehearsal.app.data.StemId
 import com.rehearsal.app.data.TrackEntity
+import com.rehearsal.app.player.AbLoop
 import com.rehearsal.app.player.MixerMath
 import com.rehearsal.app.player.PlaybackMath
 import kotlin.math.abs
@@ -43,6 +44,11 @@ data class PlayerUi(
     val clickGridVersion: Int = 0,
     val kickGridBusy: Boolean = false,
     val faders: Map<StemId, StemFader> = StemId.entries.associateWith { StemFader() },
+    val loopAMs: Long? = null,
+    val loopBMs: Long? = null,
+    val loopApplied: Boolean = false,
+    val loopPositionMs: Long = 0L,
+    val loopSpanMs: Long = 0L,
 )
 
 class PlayerViewModel(
@@ -71,6 +77,7 @@ class PlayerViewModel(
     val ui: StateFlow<PlayerUi> = _ui.asStateFlow()
 
     private var loadKey: String? = null
+    private var loopTrackId: String? = null
     private var bpmInitialized = false
     private var userOverrodeOriginalBpm = false
 
@@ -120,16 +127,22 @@ class PlayerViewModel(
         viewModelScope.launch {
             while (true) {
                 playback.applyPendingSpeed()
-                _ui.update {
-                    it.copy(
+                playback.anchorLoop()
+                val songMs = playback.positionMs()
+                val songDur = playback.durationMs()
+                _ui.update { ui ->
+                    val loop = if (ui.loopApplied) playback.currentLoop() else null
+                    ui.copy(
                         playing = playback.isPlaying(),
-                        positionMs = playback.positionMs(),
-                        durationMs = playback.durationMs(),
+                        positionMs = songMs,
+                        durationMs = songDur,
+                        loopPositionMs = if (loop != null) AbLoop.localMs(songMs, loop) else 0L,
+                        loopSpanMs = if (loop != null) AbLoop.spanMs(loop) else 0L,
                         speed = playback.playbackSpeed(),
                         metronomeBpm = playback.metronomeBpm,
                     )
                 }
-                delay(100)
+                delay(if (_ui.value.loopApplied) 40L else 100L)
             }
         }
         viewModelScope.launch {
@@ -142,6 +155,77 @@ class PlayerViewModel(
     fun togglePlay() = playback.togglePlay()
 
     fun seek(positionMs: Long) = playback.seekTo(positionMs)
+
+    fun markLoopA() {
+        val durationMs = playback.durationMs()
+        if (durationMs <= 0L) return
+        val aMs = AbLoop.snapMs(
+            playback.positionMs(),
+            playback.loopOriginUs(),
+            playback.loopIntervalUs(),
+            durationMs,
+        )
+        val keptB = _ui.value.loopBMs?.let { bMs ->
+            AbLoop.arm(aMs, bMs, playback.loopIntervalUs(), durationMs)?.bMs
+        }
+        playback.applyLoop(null)
+        _ui.update {
+            it.copy(loopAMs = aMs, loopBMs = keptB, loopApplied = false, loopSpanMs = 0L)
+        }
+    }
+
+    fun markLoopB() {
+        val aMs = _ui.value.loopAMs ?: return
+        val durationMs = playback.durationMs()
+        if (durationMs <= 0L) return
+        val bMs = AbLoop.snapMs(
+            playback.positionMs(),
+            playback.loopOriginUs(),
+            playback.loopIntervalUs(),
+            durationMs,
+        )
+        val armed = AbLoop.arm(aMs, bMs, playback.loopIntervalUs(), durationMs) ?: return
+        playback.applyLoop(null)
+        _ui.update {
+            it.copy(loopBMs = armed.bMs, loopApplied = false, loopSpanMs = 0L)
+        }
+    }
+
+    fun applyLoop() {
+        val aMs = _ui.value.loopAMs ?: return
+        val bMs = _ui.value.loopBMs ?: return
+        val durationMs = playback.durationMs()
+        val loop = AbLoop.arm(aMs, bMs, playback.loopIntervalUs(), durationMs) ?: return
+        playback.applyLoop(loop)
+        val songMs = playback.positionMs()
+        if (songMs < loop.aMs || songMs >= loop.bMs) playback.seekTo(loop.aMs)
+        val at = playback.positionMs()
+        _ui.update {
+            it.copy(
+                loopApplied = true,
+                loopPositionMs = AbLoop.localMs(at, loop),
+                loopSpanMs = AbLoop.spanMs(loop),
+            )
+        }
+    }
+
+    fun seekLoop(localMs: Long) {
+        val loop = playback.currentLoop() ?: return
+        playback.seekTo(AbLoop.songMs(localMs, loop))
+    }
+
+    fun clearLoop() {
+        playback.applyLoop(null)
+        _ui.update {
+            it.copy(
+                loopAMs = null,
+                loopBMs = null,
+                loopApplied = false,
+                loopPositionMs = 0L,
+                loopSpanMs = 0L,
+            )
+        }
+    }
 
     fun setOriginalBpmText(text: String) {
         val commit = PlaybackMath.commitOriginalBpm(text, _ui.value.originalBpm)
@@ -255,6 +339,27 @@ class PlayerViewModel(
         if (key == loadKey) return
         loadKey = key
         playback.load(item)
+        val loop = playback.currentLoop()
+        if (loopTrackId != item.id) {
+            loopTrackId = item.id
+            _ui.update {
+                it.copy(
+                    loopAMs = loop?.aMs,
+                    loopBMs = loop?.bMs,
+                    loopApplied = loop != null,
+                    loopSpanMs = if (loop != null) AbLoop.spanMs(loop) else 0L,
+                )
+            }
+        } else if (loop != null) {
+            _ui.update {
+                it.copy(
+                    loopAMs = loop.aMs,
+                    loopBMs = loop.bMs,
+                    loopApplied = true,
+                    loopSpanMs = AbLoop.spanMs(loop),
+                )
+            }
+        }
         applyMixer()
         viewModelScope.launch { refreshKickGrid(force = false) }
     }

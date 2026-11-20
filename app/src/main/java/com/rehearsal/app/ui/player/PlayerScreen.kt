@@ -113,6 +113,11 @@ fun PlayerScreen(
                 ui = ui,
                 onToggle = vm::togglePlay,
                 onSeek = vm::seek,
+                onMarkA = vm::markLoopA,
+                onMarkB = vm::markLoopB,
+                onApplyLoop = vm::applyLoop,
+                onSeekLoop = vm::seekLoop,
+                onClearLoop = vm::clearLoop,
             )
 
             if (track?.hasFourStems() == true) {
@@ -192,6 +197,11 @@ private fun Transport(
     ui: PlayerUi,
     onToggle: () -> Unit,
     onSeek: (Long) -> Unit,
+    onMarkA: () -> Unit,
+    onMarkB: () -> Unit,
+    onApplyLoop: () -> Unit,
+    onSeekLoop: (Long) -> Unit,
+    onClearLoop: () -> Unit,
 ) {
     val duration = max(ui.durationMs, 1L)
     DawCard {
@@ -235,6 +245,55 @@ private fun Transport(
                     Text(formatMs(ui.positionMs), color = Daw.text, style = MaterialTheme.typography.bodySmall)
                     Text(formatMs(ui.durationMs), color = Daw.muted, style = MaterialTheme.typography.bodySmall)
                 }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    DawLatch("A", selected = ui.loopAMs != null, onColor = Daw.accent, onClick = onMarkA)
+                    DawLatch("B", selected = ui.loopBMs != null, onColor = Daw.accent, onClick = onMarkB)
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    DawTextButton(
+                        "Применить",
+                        onApplyLoop,
+                        enabled = ui.loopAMs != null && ui.loopBMs != null && !ui.loopApplied,
+                    )
+                    DawTextButton(
+                        "Сброс",
+                        onClearLoop,
+                        enabled = ui.loopAMs != null || ui.loopBMs != null,
+                    )
+                }
+                Text(
+                    loopCaption(ui.loopAMs, ui.loopBMs, ui.loopApplied),
+                    color = if (ui.loopApplied) Daw.accent else Daw.muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        if (ui.loopApplied && ui.loopSpanMs > 0L) {
+            val span = ui.loopSpanMs
+            Text(
+                "Петля",
+                color = Daw.accent,
+                style = MaterialTheme.typography.labelMedium,
+                letterSpacing = 1.2.sp,
+            )
+            Slider(
+                value = (ui.loopPositionMs.toFloat() / span).coerceIn(0f, 1f),
+                onValueChange = { onSeekLoop((it * span).toLong()) },
+                colors = SliderDefaults.colors(
+                    thumbColor = Daw.accent,
+                    activeTrackColor = Daw.accent,
+                    inactiveTrackColor = Daw.line,
+                ),
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(formatMs(ui.loopPositionMs), color = Daw.text, style = MaterialTheme.typography.bodySmall)
+                Text(formatMs(span), color = Daw.muted, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -537,6 +596,13 @@ private fun DawTextButton(label: String, onClick: () -> Unit, enabled: Boolean =
             fontWeight = FontWeight.SemiBold,
         )
     }
+}
+
+private fun loopCaption(aMs: Long?, bMs: Long?, applied: Boolean): String = when {
+    aMs == null -> "A и B — кусок, потом «Применить»"
+    bMs == null -> "A ${formatMs(aMs)}"
+    applied -> "В песне ${formatMs(aMs)} – ${formatMs(bMs)}"
+    else -> "A ${formatMs(aMs)}  ·  B ${formatMs(bMs)}"
 }
 
 private fun formatMs(ms: Long): String {

@@ -34,6 +34,20 @@ object BeatClock {
     }
 
     /**
+     * Ближайшая доля. Ровно посередине — более поздняя, чтобы петля не съезжала назад.
+     */
+    fun nearestBeatUs(mediaTimeUs: Long, intervalUs: Long, originUs: Long = 0L): Long {
+        val time = mediaTimeUs.coerceAtLeast(0L)
+        val atOrAfter = beatAtOrAfter(time, intervalUs, originUs)
+        if (intervalUs <= 0L) return atOrAfter
+        val prev = atOrAfter - intervalUs
+        if (prev < 0L) return atOrAfter
+        val toPrev = time - prev
+        val toNext = atOrAfter - time
+        return if (toPrev < toNext) prev else atOrAfter
+    }
+
+    /**
      * Первая доля, чей клик ещё может пересекаться с [mediaStartUs]
      * (клик начался раньше и не успел закончиться).
      */
